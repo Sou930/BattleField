@@ -1,6 +1,7 @@
 // @ts-nocheck
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree, useLoader } from "@react-three/fiber";
+import { useGame as useGameHook } from "@/game/store";
 import * as THREE from "three";
 import { GameEngine } from "@/game/engine";
 import { store, useGame } from "@/game/store";
@@ -1652,28 +1653,39 @@ export default function Game() {
     store.emit();
   };
 
+  const status = useGameHook((s) => s.status);
+  const showCanvas = status !== "menu" && status !== "loadout";
+
   return (
     <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-background">
-      <Canvas
-        shadows
-        camera={{ fov: 78, near: 0.15, far: 600, position: [0, 1.7, 0] }}
-        gl={{
-          antialias: false,
-          powerPreference: "high-performance",
-          logarithmicDepthBuffer: false,
-        }}
-        dpr={[0.9, 1.25]}
-        onCreated={({ scene, gl }) => {
-          scene.background = new THREE.Color("#efd29a");
-          gl.toneMapping = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.35;
-          gl.shadowMap.enabled = true;
-          gl.shadowMap.type = THREE.PCFSoftShadowMap;
-        }}
-      >
-        {engine && <Scene engine={engine} />}
-      </Canvas>
-      <HUD onStart={showLoadout} onStartGame={startGame} input={inputRef} />
+      <div className="absolute inset-0 z-0">
+        {showCanvas && (
+          <Canvas
+            shadows
+            camera={{ fov: 78, near: 0.15, far: 600, position: [0, 1.7, 0] }}
+            gl={{
+              antialias: false,
+              powerPreference: "high-performance",
+              logarithmicDepthBuffer: false,
+            }}
+            dpr={[0.9, 1.25]}
+            onCreated={({ scene, gl }) => {
+              scene.background = new THREE.Color("#87ceeb");
+              gl.toneMapping = THREE.ACESFilmicToneMapping;
+              gl.toneMappingExposure = 1.35;
+              gl.shadowMap.enabled = true;
+              gl.shadowMap.type = THREE.PCFSoftShadowMap;
+            }}
+          >
+            <Suspense fallback={null}>
+              {engine && <Scene engine={engine} />}
+            </Suspense>
+          </Canvas>
+        )}
+      </div>
+      <div className="absolute inset-0 z-10">
+        <HUD onStart={showLoadout} onStartGame={startGame} input={inputRef} />
+      </div>
     </div>
   );
 }
