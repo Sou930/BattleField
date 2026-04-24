@@ -8,33 +8,38 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 34 42% 16%;
+    --foreground: 38 78% 92%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card: 35 38% 20%;
+    --card-foreground: 38 78% 92%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover: 35 38% 20%;
+    --popover-foreground: 38 78% 92%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 39 84% 62%;
+    --primary-foreground: 34 42% 12%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 30 42% 28%;
+    --secondary-foreground: 38 78% 92%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 33 28% 24%;
+    --muted-foreground: 39 42% 73%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 186 46% 48%;
+    --accent-foreground: 34 42% 12%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 7 82% 58%;
+    --destructive-foreground: 38 78% 92%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 34 30% 32%;
+    --input: 34 30% 32%;
+    --ring: 39 84% 62%;
+    --hud: 43 90% 74%;
+    --hud-foreground: 34 42% 12%;
+    --danger: 7 88% 58%;
+    --health: 128 48% 52%;
+    --ammo: 43 88% 62%;
 
     --radius: 0.5rem;
 
