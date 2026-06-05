@@ -13,6 +13,7 @@ export interface Building {
   // bounds (for spawn checks)
   min: THREE.Vector3;
   max: THREE.Vector3;
+  info?: BuildingInfo;
 }
 
 export interface Crate {
@@ -116,18 +117,41 @@ export function baseTerrainHeight(x: number, z: number): number {
 const SAND_PALETTE = ["#c9a874", "#b89968", "#a98456", "#d4b585", "#b08858", "#8d6d44"];
 const ROOF_PALETTE = ["#7a5238", "#8a5e3e", "#6b4830", "#9a6a45"];
 
+// Per-building metadata so the renderer can decorate facades with windows,
+// balconies and parapets that line up with the actual storeys.
+export interface BuildingInfo {
+  cx: number;
+  cz: number;
+  w: number;
+  d: number;
+  h: number;
+  floors: number;
+  floorH: number;
+  doorSide: number; // 0=+z, 1=-z, 2=+x, 3=-x
+  color: string;
+  roofColor: string;
+  hasParapet: boolean;
+}
+
+const STOREY_HEIGHT = 3.4; // realistic per-floor height
+
 function makeBuilding(
   rng: () => number,
   cx: number,
   cz: number,
   w: number,
   d: number,
-  h: number,
+  hRequested: number,
 ): Building {
   const walls: Wall[] = [];
   const wallT = 0.4;
   const color = SAND_PALETTE[Math.floor(rng() * SAND_PALETTE.length)];
   const roofColor = ROOF_PALETTE[Math.floor(rng() * ROOF_PALETTE.length)];
+
+  // Quantize the height into whole storeys so floors line up cleanly.
+  const floors = Math.max(1, Math.round(hRequested / STOREY_HEIGHT));
+  const floorH = STOREY_HEIGHT;
+  const h = floors * floorH;
 
   const halfW = w / 2;
   const halfD = d / 2;
@@ -137,81 +161,111 @@ function makeBuilding(
   const doorWidth = 1.6;
   const doorHeight = 2.2;
 
-  // Helper to add a wall with a gap (door) along an axis
-  const addWallWithDoor = (
+  // A façade wall for ONE storey, optionally pierced by a door (ground floor)
+  // and window openings on the upper part.
+  const addFacade = (
     centerX: number,
     centerZ: number,
     spanAxis: "x" | "z",
     spanLen: number,
+    baseY: number,
+    storeyH: number,
     hasDoor: boolean,
   ) => {
-    if (!hasDoor) {
-      // single solid wall
-      const sx = spanAxis === "x" ? spanLen : wallT;
-      const sz = spanAxis === "z" ? spanLen : wallT;
-      walls.push({
-        pos: new THREE.Vector3(centerX, h / 2, centerZ),
-        size: new THREE.Vector3(sx, h, sz),
-        color,
-        kind: "wall",
-      });
-      return;
-    }
-    // door is in the middle of this span
-    const halfSpan = spanLen / 2;
-    const halfDoor = doorWidth / 2;
-    // segment 1: from -half to -halfDoor
-    const seg1Len = halfSpan - halfDoor;
-    const seg2Len = halfSpan - halfDoor;
-    if (spanAxis === "x") {
-      walls.push({
-        pos: new THREE.Vector3(centerX - (halfDoor + seg1Len / 2), h / 2, centerZ),
-        size: new THREE.Vector3(seg1Len, h, wallT),
-        color,
-        kind: "wall",
-      });
-      walls.push({
-        pos: new THREE.Vector3(centerX + (halfDoor + seg2Len / 2), h / 2, centerZ),
-        size: new THREE.Vector3(seg2Len, h, wallT),
-        color,
-        kind: "wall",
-      });
-      // lintel above door
-      walls.push({
-        pos: new THREE.Vector3(centerX, doorHeight + (h - doorHeight) / 2, centerZ),
-        size: new THREE.Vector3(doorWidth, h - doorHeight, wallT),
-        color,
-        kind: "wall",
-      });
+    const segs: { off: number; len: number }[] = [];
+    if (hasDoor) {
+      const halfSpan = spanLen / 2;
+      const halfDoor = doorWidth / 2;
+      const sideLen = halfSpan - halfDoor;
+      segs.push({ off: -(halfDoor + sideLen / 2), len: sideLen });
+      segs.push({ off: halfDoor + sideLen / 2, len: sideLen });
     } else {
+      segs.push({ off: 0, len: spanLen });
+    }
+    for (const sg of segs) {
+      if (sg.len <= 0.05) continue;
+      const px = spanAxis === "x" ? centerX + sg.off : centerX;
+      const pz = spanAxis === "z" ? centerZ + sg.off : centerZ;
+      const sx = spanAxis === "x" ? sg.len : wallT;
+      const sz = spanAxis === "z" ? sg.len : wallT;
       walls.push({
-        pos: new THREE.Vector3(centerX, h / 2, centerZ - (halfDoor + seg1Len / 2)),
-        size: new THREE.Vector3(wallT, h, seg1Len),
+        pos: new THREE.Vector3(px, baseY + storeyH / 2, pz),
+        size: new THREE.Vector3(sx, storeyH, sz),
         color,
         kind: "wall",
       });
-      walls.push({
-        pos: new THREE.Vector3(centerX, h / 2, centerZ + (halfDoor + seg2Len / 2)),
-        size: new THREE.Vector3(wallT, h, seg2Len),
-        color,
-        kind: "wall",
-      });
-      walls.push({
-        pos: new THREE.Vector3(centerX, doorHeight + (h - doorHeight) / 2, centerZ),
-        size: new THREE.Vector3(wallT, h - doorHeight, doorWidth),
-        color,
-        kind: "wall",
-      });
+    }
+    // Lintel above the door so the opening is only door-height.
+    if (hasDoor) {
+      const lintelH = storeyH - doorHeight;
+      if (lintelH > 0.05) {
+        const sx = spanAxis === "x" ? doorWidth : wallT;
+        const sz = spanAxis === "z" ? doorWidth : wallT;
+        walls.push({
+          pos: new THREE.Vector3(centerX, baseY + doorHeight + lintelH / 2, centerZ),
+          size: new THREE.Vector3(sx, lintelH, sz),
+          color,
+          kind: "wall",
+        });
+      }
     }
   };
 
-  // 4 walls
-  addWallWithDoor(cx, cz + halfD, "x", w, doorSide === 0);
-  addWallWithDoor(cx, cz - halfD, "x", w, doorSide === 1);
-  addWallWithDoor(cx + halfW, cz, "z", d, doorSide === 2);
-  addWallWithDoor(cx - halfW, cz, "z", d, doorSide === 3);
+  // Build each storey's four façades.
+  for (let f = 0; f < floors; f++) {
+    const baseY = f * floorH;
+    const groundFloor = f === 0;
+    addFacade(cx, cz + halfD, "x", w, baseY, floorH, groundFloor && doorSide === 0);
+    addFacade(cx, cz - halfD, "x", w, baseY, floorH, groundFloor && doorSide === 1);
+    addFacade(cx + halfW, cz, "z", d, baseY, floorH, groundFloor && doorSide === 2);
+    addFacade(cx - halfW, cz, "z", d, baseY, floorH, groundFloor && doorSide === 3);
 
-  // Roof (slightly thinner than walls so player can be inside)
+    // Interior floor slab for storeys above the ground (a real walkable deck
+    // for the upper levels), with a stair opening left in one corner.
+    if (f > 0) {
+      const slabY = baseY;
+      const holeW = Math.min(2.6, w * 0.4);
+      const holeD = Math.min(2.6, d * 0.4);
+      // Stair hole in the -x/-z corner; build slab as 2 L-shaped boxes.
+      const hx = cx - halfW + holeW / 2 + 0.2;
+      const hz = cz - halfD + holeD / 2 + 0.2;
+      // Big slab covering everything except a strip on the -x side for the hole
+      walls.push({
+        pos: new THREE.Vector3(cx + holeW / 2, slabY, cz),
+        size: new THREE.Vector3(w - holeW, 0.25, d),
+        color: roofColor,
+        kind: "floor",
+      });
+      walls.push({
+        pos: new THREE.Vector3(hx, slabY, cz + holeD / 2),
+        size: new THREE.Vector3(holeW, 0.25, d - holeD),
+        color: roofColor,
+        kind: "floor",
+      });
+      void hz;
+    }
+  }
+
+  // Corner pilasters (quoins) for facade depth on bigger buildings.
+  if (w > 9 && d > 9) {
+    const pT = 0.7;
+    const corners = [
+      [cx - halfW, cz - halfD],
+      [cx + halfW, cz - halfD],
+      [cx - halfW, cz + halfD],
+      [cx + halfW, cz + halfD],
+    ];
+    for (const [px, pz] of corners) {
+      walls.push({
+        pos: new THREE.Vector3(px, h / 2, pz),
+        size: new THREE.Vector3(pT, h, pT),
+        color,
+        kind: "pillar",
+      });
+    }
+  }
+
+  // Roof slab
   walls.push({
     pos: new THREE.Vector3(cx, h + 0.15, cz),
     size: new THREE.Vector3(w + 0.3, 0.3, d + 0.3),
@@ -219,23 +273,50 @@ function makeBuilding(
     kind: "roof",
   });
 
-  // Optional second floor for taller buildings
-  if (h > 8 && rng() > 0.5) {
-    // floor at h/2 with hole (skip floor for simplicity, just add no floor)
-    // add a small interior pillar instead
-    walls.push({
-      pos: new THREE.Vector3(cx + (rng() - 0.5) * (w * 0.3), h / 2, cz + (rng() - 0.5) * (d * 0.3)),
-      size: new THREE.Vector3(0.6, h, 0.6),
-      color,
-      kind: "pillar",
-    });
+  // Rooftop parapet (low wall around the edge) — gives rooftop cover and a more
+  // realistic flat-roof silhouette. Taller buildings only.
+  const hasParapet = floors >= 2;
+  if (hasParapet) {
+    const pH = 0.9;
+    const pT = 0.35;
+    const pY = h + pH / 2 + 0.3;
+    walls.push({ pos: new THREE.Vector3(cx, pY, cz + halfD), size: new THREE.Vector3(w + 0.4, pH, pT), color: roofColor, kind: "barrier" });
+    walls.push({ pos: new THREE.Vector3(cx, pY, cz - halfD), size: new THREE.Vector3(w + 0.4, pH, pT), color: roofColor, kind: "barrier" });
+    walls.push({ pos: new THREE.Vector3(cx + halfW, pY, cz), size: new THREE.Vector3(pT, pH, d + 0.4), color: roofColor, kind: "barrier" });
+    walls.push({ pos: new THREE.Vector3(cx - halfW, pY, cz), size: new THREE.Vector3(pT, pH, d + 0.4), color: roofColor, kind: "barrier" });
   }
 
-  return {
+  // Interior staircase: a stepped ramp of boxes climbing each storey in the
+  // -x/-z corner so the AI/player can reach upper floors.
+  if (floors >= 2) {
+    const stepCount = Math.max(5, Math.round(floorH / 0.45));
+    for (let f = 0; f < floors - 1; f++) {
+      const baseY = f * floorH;
+      const run = Math.min(d - 1.5, 4.5);
+      const startZ = cz - halfD + 0.7;
+      for (let st = 0; st < stepCount; st++) {
+        const t = st / stepCount;
+        const stepY = baseY + t * floorH;
+        const stepZ = startZ + t * run;
+        walls.push({
+          pos: new THREE.Vector3(cx - halfW + 1.0, stepY + 0.15, stepZ),
+          size: new THREE.Vector3(1.6, 0.3, run / stepCount + 0.25),
+          color: roofColor,
+          kind: "floor",
+        });
+      }
+    }
+  }
+
+  const b: Building = {
     walls,
     min: new THREE.Vector3(cx - halfW, 0, cz - halfD),
     max: new THREE.Vector3(cx + halfW, h, cz + halfD),
+    info: {
+      cx, cz, w, d, h, floors, floorH, doorSide, color, roofColor, hasParapet,
+    },
   };
+  return b;
 }
 
 export interface Road {
@@ -327,9 +408,11 @@ export function generateWorld(): World {
       if (Math.hypot(cx0, cz0) < cellSize * 1.2) continue;
       if (Math.hypot(cx0, cz0) > cityRadius) continue;
       if (rng() < 0.28) continue; // street/plaza
-      const w = 8 + rng() * 12;
-      const d = 8 + rng() * 12;
-      const h = 4 + rng() * 12;
+      const w = 9 + rng() * 13;
+      const d = 9 + rng() * 13;
+      // Mix of heights: mostly 1-3 storeys with occasional 4-5 storey towers
+      const tower = rng() < 0.22;
+      const h = tower ? STOREY_HEIGHT * (3.5 + rng() * 1.6) : STOREY_HEIGHT * (1 + rng() * 2.2);
       buildings.push(
         makeBuilding(
           rng,
@@ -506,89 +589,67 @@ export function generateWorld(): World {
     }
   }
 
-  // Windows on building exterior walls + awnings above doors
+  // Windows on building exterior walls (one row per storey) + balconies on
+  // upper floors + awnings above doors. Uses per-building storey info so the
+  // glazing lines up with the real floors.
   const tentColors2 = ["#b04030", "#3060a0", "#a08030", "#6a4030", "#8a6020"];
   for (const b of buildings) {
-    const bw = b.max.x - b.min.x;
-    const bd = b.max.z - b.min.z;
-    const bh = b.max.y;
-    const cx = (b.min.x + b.max.x) / 2;
-    const cz = (b.min.z + b.max.z) / 2;
-    // Number of windows per long side ~ length/4
-    const nx = Math.max(1, Math.floor(bw / 4));
-    const nz = Math.max(1, Math.floor(bd / 4));
-    const winH = 0.9;
-    const winW = 0.7;
-    const sillY = 1.6;
-    for (let i = 0; i < nx; i++) {
-      const fx = b.min.x + (i + 0.5) * (bw / nx);
-      // skip if too close to door (center of side)
-      const closeToDoor = Math.abs(fx - cx) < 1.2;
-      if (!closeToDoor) {
-        windows.push({
-          pos: new THREE.Vector3(fx, sillY, b.min.z - 0.05),
-          size: new THREE.Vector3(winW, winH, 0.05),
-          lit: rng() > 0.5,
-        });
-        windows.push({
-          pos: new THREE.Vector3(fx, sillY, b.max.z + 0.05),
-          size: new THREE.Vector3(winW, winH, 0.05),
-          lit: rng() > 0.5,
-        });
+    if (!b.info) continue;
+    const { cx, cz, w: bw, d: bd, floors, floorH, doorSide } = b.info;
+    const halfW = bw / 2;
+    const halfD = bd / 2;
+    const nx = Math.max(1, Math.floor(bw / 3.2));
+    const nz = Math.max(1, Math.floor(bd / 3.2));
+    const winH = 1.1;
+    const winW = 0.8;
+
+    for (let f = 0; f < floors; f++) {
+      // window sits in the upper portion of each storey
+      const sillY = f * floorH + floorH * 0.5;
+      // +z / -z faces (vary along x)
+      for (let i = 0; i < nx; i++) {
+        const fx = b.min.x + (i + 0.5) * (bw / nx);
+        const overDoorZpos = f === 0 && (doorSide === 0) && Math.abs(fx - cx) < 1.3;
+        const overDoorZneg = f === 0 && (doorSide === 1) && Math.abs(fx - cx) < 1.3;
+        if (!overDoorZpos) {
+          windows.push({ pos: new THREE.Vector3(fx, sillY, b.max.z + 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.45 });
+        }
+        if (!overDoorZneg) {
+          windows.push({ pos: new THREE.Vector3(fx, sillY, b.min.z - 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.45 });
+        }
       }
-      if (bh > 7) {
-        windows.push({
-          pos: new THREE.Vector3(fx, sillY + 3.2, b.min.z - 0.05),
-          size: new THREE.Vector3(winW, winH, 0.05),
-          lit: rng() > 0.5,
-        });
-        windows.push({
-          pos: new THREE.Vector3(fx, sillY + 3.2, b.max.z + 0.05),
-          size: new THREE.Vector3(winW, winH, 0.05),
-          lit: rng() > 0.5,
-        });
+      // +x / -x faces (vary along z)
+      for (let i = 0; i < nz; i++) {
+        const fz = b.min.z + (i + 0.5) * (bd / nz);
+        const overDoorXpos = f === 0 && (doorSide === 2) && Math.abs(fz - cz) < 1.3;
+        const overDoorXneg = f === 0 && (doorSide === 3) && Math.abs(fz - cz) < 1.3;
+        if (!overDoorXpos) {
+          windows.push({ pos: new THREE.Vector3(b.max.x + 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.45 });
+        }
+        if (!overDoorXneg) {
+          windows.push({ pos: new THREE.Vector3(b.min.x - 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.45 });
+        }
       }
+
+      // Balcony slab on a random upper-floor face for buildings with >=2 floors.
+      if (f >= 1 && rng() < 0.35) {
+        const balconyY = f * floorH + 0.2;
+        const bSide = Math.floor(rng() * 4);
+        const bColor = ROOF_PALETTE[Math.floor(rng() * ROOF_PALETTE.length)];
+        if (bSide === 0) awnings.push({ pos: new THREE.Vector3(cx, balconyY, b.max.z + 0.7), size: new THREE.Vector3(Math.min(bw * 0.6, 3), 0.16, 1.3), color: bColor });
+        else if (bSide === 1) awnings.push({ pos: new THREE.Vector3(cx, balconyY, b.min.z - 0.7), size: new THREE.Vector3(Math.min(bw * 0.6, 3), 0.16, 1.3), color: bColor });
+        else if (bSide === 2) awnings.push({ pos: new THREE.Vector3(b.max.x + 0.7, balconyY, cz), size: new THREE.Vector3(1.3, 0.16, Math.min(bd * 0.6, 3)), color: bColor });
+        else awnings.push({ pos: new THREE.Vector3(b.min.x - 0.7, balconyY, cz), size: new THREE.Vector3(1.3, 0.16, Math.min(bd * 0.6, 3)), color: bColor });
+      }
+      void halfW; void halfD;
     }
-    for (let i = 0; i < nz; i++) {
-      const fz = b.min.z + (i + 0.5) * (bd / nz);
-      const closeToDoor = Math.abs(fz - cz) < 1.2;
-      if (!closeToDoor) {
-        windows.push({
-          pos: new THREE.Vector3(b.min.x - 0.05, sillY, fz),
-          size: new THREE.Vector3(0.05, winH, winW),
-          lit: rng() > 0.5,
-        });
-        windows.push({
-          pos: new THREE.Vector3(b.max.x + 0.05, sillY, fz),
-          size: new THREE.Vector3(0.05, winH, winW),
-          lit: rng() > 0.5,
-        });
-      }
-      if (bh > 7) {
-        windows.push({
-          pos: new THREE.Vector3(b.min.x - 0.05, sillY + 3.2, fz),
-          size: new THREE.Vector3(0.05, winH, winW),
-          lit: rng() > 0.5,
-        });
-        windows.push({
-          pos: new THREE.Vector3(b.max.x + 0.05, sillY + 3.2, fz),
-          size: new THREE.Vector3(0.05, winH, winW),
-          lit: rng() > 0.5,
-        });
-      }
-    }
-    // Awning at random side
-    const aSide = Math.floor(rng() * 4);
+
+    // Cloth awning directly above the entrance door.
     const awColor = tentColors2[Math.floor(rng() * tentColors2.length)];
-    if (aSide === 0) {
-      awnings.push({ pos: new THREE.Vector3(cx, 2.6, b.max.z + 0.6), size: new THREE.Vector3(2.4, 0.05, 1.2), color: awColor });
-    } else if (aSide === 1) {
-      awnings.push({ pos: new THREE.Vector3(cx, 2.6, b.min.z - 0.6), size: new THREE.Vector3(2.4, 0.05, 1.2), color: awColor });
-    } else if (aSide === 2) {
-      awnings.push({ pos: new THREE.Vector3(b.max.x + 0.6, 2.6, cz), size: new THREE.Vector3(1.2, 0.05, 2.4), color: awColor });
-    } else {
-      awnings.push({ pos: new THREE.Vector3(b.min.x - 0.6, 2.6, cz), size: new THREE.Vector3(1.2, 0.05, 2.4), color: awColor });
-    }
+    if (doorSide === 0) awnings.push({ pos: new THREE.Vector3(cx, 2.6, b.max.z + 0.6), size: new THREE.Vector3(2.6, 0.05, 1.2), color: awColor });
+    else if (doorSide === 1) awnings.push({ pos: new THREE.Vector3(cx, 2.6, b.min.z - 0.6), size: new THREE.Vector3(2.6, 0.05, 1.2), color: awColor });
+    else if (doorSide === 2) awnings.push({ pos: new THREE.Vector3(b.max.x + 0.6, 2.6, cz), size: new THREE.Vector3(1.2, 0.05, 2.6), color: awColor });
+    else awnings.push({ pos: new THREE.Vector3(b.min.x - 0.6, 2.6, cz), size: new THREE.Vector3(1.2, 0.05, 2.6), color: awColor });
   }
 
   // Decorative rugs around plaza
