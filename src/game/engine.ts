@@ -1051,7 +1051,7 @@ export class GameEngine {
       const classSpec = CLASSES[s.soldierClass];
 
       // ---- 1. Target selection: own sight + nearby squad callouts ----
-      let visibleTargets: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; dist: number }[] = [];
+      const visibleTargets: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; dist: number }[] = [];
       const cand: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean }[] = [];
       if (s.team === "red" && playerAlive) {
         cand.push({ pos: p.pos, vel: p.vel, id: 0, isPlayer: true });
@@ -1187,44 +1187,77 @@ export class GameEngine {
 
       const hasLOS = !!visTarget;
 
-      // ---- 4. Tactical decision making — AGGRESSIVE: prefer pushing the target ----
-      const inCommittedState = s.state === "flank" || s.state === "retreat";
-      if (time >= s.nextTacticalDecisionAt && !(inCommittedState && s.coverTimer > 0)) {
-        s.nextTacticalDecisionAt = time + (inCommittedState ? 1.4 : 0.8) + Math.random() * 0.4;
-        const veryLowHp = s.hp < s.hpMax * 0.15; // only retreat when nearly dead
+      // Local squad strength near this soldier vs near the threat — used so a
+      // lone, outnumbered soldier behaves more cautiously instead of suicide-rushing.
+      let alliesNear = 0;
+      let enemiesNearThreat = 0;
+      for (const o of this.state.soldiers) {
+        if (!o.alive) continue;
+        if (o.team === s.team && o.id !== s.id && o.pos.distanceTo(s.pos) < 26) alliesNear++;
+        else if (o.team !== s.team && o.pos.distanceTo(target.pos) < 22) enemiesNearThreat++;
+      }
+      const outnumbered = enemiesNearThreat > alliesNear + 1;
 
-        // Class-driven aggressive behavior
-        if (veryLowHp && Math.random() < 0.55) {
+      // ---- 4. Tactical decision making — aggressive but cover-aware ----
+      const inCommittedState = s.state === "flank" || s.state === "retreat" || s.state === "cover";
+      if (time >= s.nextTacticalDecisionAt && !(inCommittedState && s.coverTimer > 0)) {
+        s.nextTacticalDecisionAt = time + (inCommittedState ? 1.4 : 0.7) + Math.random() * 0.4;
+        const hpFrac = s.hp / s.hpMax;
+        const lowHp = hpFrac < 0.35;
+        const veryLowHp = hpFrac < 0.2;
+
+        // --- Survival first: break contact when badly hurt or badly outnumbered ---
+        if ((veryLowHp || (lowHp && outnumbered)) && Math.random() < 0.7) {
           s.state = "retreat";
+        } else if (lowHp || (outnumbered && hasLOS && dist < 35)) {
+          // Hurt or pinned: seek cover and hold/peek instead of charging.
+          const cover = this.findCoverNear(s.pos, target.pos, s.soldierClass === "sniper" ? 26 : 16);
+          if (cover) {
+            s.state = "cover";
+            s.coverTarget = cover;
+            s.coverTimer = 1.6 + Math.random() * 1.4;
+          } else {
+            s.state = "suppress";
+          }
         } else if (s.soldierClass === "sniper") {
-          // Snipers still prefer range but push if needed
-          s.state = hasLOS && dist > 18 ? "attack" : (dist < 10 ? "flank" : "chase");
+          // Snipers hold range from cover; only reposition when pushed.
+          if (hasLOS && dist < 12) {
+            s.state = "flank"; // too close, create distance via lateral move
+          } else if (hasLOS && dist > 20) {
+            const cover = this.findCoverNear(s.pos, target.pos, 22);
+            if (cover && Math.random() < 0.5) { s.state = "cover"; s.coverTarget = cover; s.coverTimer = 2.2; }
+            else s.state = "attack";
+          } else s.state = hasLOS ? "attack" : "chase";
         } else if (s.soldierClass === "support") {
-          // Push and suppress aggressively
-          if (hasLOS && dist < 18) s.state = "attack";
-          else if (hasLOS && dist < 55) s.state = Math.random() < 0.4 ? "flank" : "suppress";
-          else s.state = "chase";
+          // Suppress from a held position, push when the lane is clear.
+          if (hasLOS && dist < 16) s.state = "attack";
+          else if (hasLOS && dist < 60) s.state = Math.random() < 0.35 ? "flank" : "suppress";
+          else s.state = hasLOS ? "chase" : "investigate";
         } else if (s.soldierClass === "assault") {
-          // Always push: flank at range, attack up close
-          if (hasLOS && dist < 11) s.state = "attack";
-          else if (hasLOS && dist < 45 && Math.random() < 0.55) s.state = "flank";
+          // Aggressive pusher, but takes cover when contact opens at mid range.
+          if (hasLOS && dist < 12) s.state = "attack";
+          else if (hasLOS && dist < 22 && Math.random() < 0.3) {
+            const cover = this.findCoverNear(s.pos, target.pos, 12);
+            if (cover) { s.state = "cover"; s.coverTarget = cover; s.coverTimer = 1.1; }
+            else s.state = "flank";
+          } else if (hasLOS && dist < 48 && Math.random() < 0.55) s.state = "flank";
           else s.state = hasLOS ? "chase" : "investigate";
         } else { // medic
-          const hurtAlly = this.state.soldiers.find((ally) => ally.alive && ally.team === s.team && ally.hp < ally.hpMax * 0.4 && ally.pos.distanceTo(s.pos) < 22);
-          if (hurtAlly && Math.random() < 0.55) {
+          const hurtAlly = this.state.soldiers.find((ally) => ally.alive && ally.team === s.team && ally.hp < ally.hpMax * 0.4 && ally.pos.distanceTo(s.pos) < 24);
+          if (hurtAlly && Math.random() < 0.6) {
             s.state = "cover";
             s.coverTarget = hurtAlly.pos.clone().addScaledVector(dirToT, -2);
             s.coverTimer = 1.2;
-          } else s.state = hasLOS ? (dist < 14 ? "attack" : "chase") : "investigate";
+          } else s.state = hasLOS ? (dist < 16 ? "attack" : "chase") : "investigate";
         }
 
-        // Throw grenade more often to push enemy out
-        if (hasLOS && dist > 6 && dist < 42 && time - s.lastGrenadeAt > 3.2 && Math.random() < 0.55) {
+        // Throw a grenade to flush a target out of cover / break a standoff.
+        if (hasLOS && dist > 7 && dist < 40 && time - s.lastGrenadeAt > 4.0 && Math.random() < 0.45) {
           this.aiThrowGrenade(s, target.pos);
           s.lastGrenadeAt = time;
         }
-        // Smoke only when actually retreating
-        if (s.state === "retreat" && time - s.lastSmokeAt > 8 && Math.random() < 0.35) {
+        // Pop smoke to cover a retreat or a wounded advance.
+        if ((s.state === "retreat" || (lowHp && s.state === "cover")) && time - s.lastSmokeAt > 9 && Math.random() < 0.4) {
           this.aiThrowSmoke(s, target.pos);
           s.lastSmokeAt = time;
         }
@@ -1238,13 +1271,27 @@ export class GameEngine {
         case "cover": {
           s.coverTimer -= dt;
           if (s.coverTimer <= 0 || !s.coverTarget) {
+            // Recovered / held long enough: peek out and re-engage.
             s.state = "attack";
             s.coverTarget = null;
           } else {
             const toCover = new THREE.Vector3().subVectors(s.coverTarget, s.pos); toCover.y = 0;
-            if (toCover.length() > 0.8) {
+            const coverDist = toCover.length();
+            if (coverDist > 0.9) {
+              // Still moving to the cover spot — sprint there.
               move.copy(toCover.normalize());
-              speedMult = 1.4;
+              speedMult = 1.45;
+            } else {
+              // In position: hug the spot with a small peek when ready to fire.
+              const settled = coverDist < 0.4;
+              if (settled && hasLOS && s.coverTimer < 0.9) {
+                // peek toward threat for a shot opportunity
+                move.copy(dirToT).multiplyScalar(0.25);
+                speedMult = 0.6;
+              } else {
+                move.set(0, 0, 0);
+                speedMult = 0;
+              }
             }
           }
           break;
@@ -1385,6 +1432,47 @@ export class GameEngine {
     return best;
   }
 
+  // Find a nearby cover spot (behind a crate / sandbag / barrel / wall) that
+  // breaks line of sight from the threat. Returns null if nothing suitable.
+  private findCoverNear(pos: THREE.Vector3, threat: THREE.Vector3, maxDist: number): THREE.Vector3 | null {
+    let best: THREE.Vector3 | null = null;
+    let bestScore = Infinity;
+    // Gather candidate cover objects (low/solid props the AI can hide behind).
+    const props: { x: number; z: number; r: number }[] = [];
+    for (const c of this.world.crates) {
+      if (Math.hypot(c.pos.x - pos.x, c.pos.z - pos.z) < maxDist + 4) props.push({ x: c.pos.x, z: c.pos.z, r: c.size * 0.5 + 0.6 });
+    }
+    for (const sb of this.world.sandbags) {
+      const r = Math.max(sb.size.x, sb.size.z) * 0.5 + 0.7;
+      if (Math.hypot(sb.pos.x - pos.x, sb.pos.z - pos.z) < maxDist + 4) props.push({ x: sb.pos.x, z: sb.pos.z, r });
+    }
+    for (const b of this.world.barrels) {
+      if (Math.hypot(b.pos.x - pos.x, b.pos.z - pos.z) < maxDist + 4) props.push({ x: b.pos.x, z: b.pos.z, r: 1.0 });
+    }
+    for (const prop of props) {
+      // Stand on the side of the prop facing away from the threat.
+      const ax = prop.x - threat.x;
+      const az = prop.z - threat.z;
+      const al = Math.hypot(ax, az) || 0.0001;
+      const spot = new THREE.Vector3(
+        prop.x + (ax / al) * (prop.r + SOLDIER_RADIUS + 0.3),
+        0,
+        prop.z + (az / al) * (prop.r + SOLDIER_RADIUS + 0.3),
+      );
+      const d = Math.hypot(spot.x - pos.x, spot.z - pos.z);
+      if (d > maxDist) continue;
+      if (this.isInsideBuilding(spot, -0.3)) continue;
+      // Prefer cover that actually blocks LOS to the threat and is close.
+      spot.y = terrainHeightAt(this.world, spot.x, spot.z) + SOLDIER_HEIGHT;
+      const eye = _tmpV1.set(spot.x, spot.y - 0.4, spot.z);
+      const te = _tmpV2.set(threat.x, threat.y, threat.z);
+      const blocked = !this.lineOfSight(eye, te);
+      const score = d + (blocked ? 0 : 30);
+      if (score < bestScore) { bestScore = score; best = spot; }
+    }
+    return best;
+  }
+
   private isMoveBlocked(pos: THREE.Vector3, dir: THREE.Vector3, distance: number) {
     const ahead = pos.clone().addScaledVector(dir, distance);
     for (const b of this.boxes) {
@@ -1397,7 +1485,13 @@ export class GameEngine {
 
   // Steering with obstacle avoidance + ally separation
   private steerAndMove(s: Soldier, desired: THREE.Vector3, speed: number, dt: number) {
-    if (desired.lengthSq() < 0.0001) return;
+    if (desired.lengthSq() < 0.0001) {
+      // Decay smoothed movement toward rest so "holding still" registers as
+      // stationary for the stop-and-shoot accuracy bonus.
+      s.moveDir.x += (0 - s.moveDir.x) * Math.min(1, dt * 8);
+      s.moveDir.z += (0 - s.moveDir.z) * Math.min(1, dt * 8);
+      return;
+    }
     desired = desired.clone().setY(0).normalize();
 
     // Obstacle whisker: probe forward and adjust
@@ -1514,7 +1608,7 @@ export class GameEngine {
   private soldierShoot(s: Soldier, target: { pos: THREE.Vector3; vel?: THREE.Vector3; isPlayer: boolean; id: number; dist?: number }, dirToT: THREE.Vector3, time: number) {
     const dist = target.dist ?? s.pos.distanceTo(target.pos);
     // Distance-based and class-based hit chance
-    let baseHit = s.soldierClass === "sniper" ? 0.94
+    const baseHit = s.soldierClass === "sniper" ? 0.94
       : s.soldierClass === "support" ? 0.66
       : s.soldierClass === "assault" ? 0.80
       : 0.72;
@@ -1523,8 +1617,10 @@ export class GameEngine {
     const falloffEnd = s.soldierClass === "sniper" ? 100 : 55;
     const falloff = THREE.MathUtils.clamp((dist - falloffStart) / (falloffEnd - falloffStart), 0, 1);
     const distMult = 1 - falloff * 0.55;
-    // Movement penalty: if shooter just moved fast, accuracy down
-    const shooterMoving = Math.hypot(s.moveDir.x, s.moveDir.z) > 0.5 ? 0.85 : 1.0;
+    // Movement penalty: if shooter just moved fast, accuracy down. Holding
+    // still (cover / suppress) gives a marked stop-and-shoot accuracy bonus.
+    const moveSpeed = Math.hypot(s.moveDir.x, s.moveDir.z);
+    const shooterMoving = moveSpeed > 0.5 ? 0.8 : (moveSpeed < 0.12 ? 1.12 : 1.0);
     // Target moving penalty
     const tMove = target.vel ? Math.hypot(target.vel.x, target.vel.z) : 0;
     const tgtMoving = tMove > 4 ? 0.8 : 1.0;
