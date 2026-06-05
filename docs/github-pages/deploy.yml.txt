@@ -36,6 +36,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Disable Jekyll processing so files/folders starting with "_" are served.
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
