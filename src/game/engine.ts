@@ -6,7 +6,6 @@ import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, ma
 import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass } from "./types";
 import { CLASSES } from "./classes";
 import { soundEngine } from "./sound";
-import { NetManager } from "@/net/net";
 
 const PLAYER_RADIUS = 0.4;
 const PLAYER_HEIGHT = 1.7;
@@ -152,14 +151,6 @@ export class GameEngine {
     // Init sound for everyone
     soundEngine.init();
 
-    // CLIENT mode: don't spawn soldiers/capture/vehicles/pickups — host owns them and broadcasts state.
-    if (NetManager.mode === "client") {
-      this.state.pickups = [];
-      this.state.capturePoints = [];
-      this.state.vehicles = [];
-      return;
-    }
-
     this.state.pickups = this.world.pickupSpawns.map((sp) => ({
       id: this.state.nextPickupId++,
       pos: sp.pos.clone(),
@@ -243,25 +234,6 @@ export class GameEngine {
   update(dt: number, time: number) {
     if (this.state.status !== "playing") return;
 
-    // CLIENT mode: skip simulation; just handle local input + camera + local hitscan + send input.
-    if (NetManager.mode === "client") {
-      this.handleInput(dt, time);
-      if (this.state.playerInVehicle) {
-        this.updatePlayerVehicle(dt);
-      } else {
-        this.updatePlayer(dt);
-      }
-      this.updateEffects(dt);
-      // Send input ~20Hz
-      NetManager.clientSendInput(this.state, dt, this.input.mouse.left, false);
-      this.emitTimer += dt;
-      if (this.emitTimer > 0.05) {
-        this.emitTimer = 0;
-        store.emit();
-      }
-      return;
-    }
-
     this.handleInput(dt, time);
     if (this.state.playerInVehicle) {
       this.updatePlayerVehicle(dt);
@@ -280,12 +252,6 @@ export class GameEngine {
 
     // Medic heal aura
     this.updateMedicHeal(dt, time);
-
-    // HOST mode: apply remote inputs + broadcast snapshot
-    if (NetManager.mode === "host") {
-      NetManager.applyRemoteInputs(this.state, dt, time);
-      NetManager.hostBroadcast(this.state, dt, time);
-    }
 
     this.emitTimer += dt;
     if (this.emitTimer > 0.05) {
@@ -722,19 +688,14 @@ export class GameEngine {
         ttl: 0.9,
         isCrit: isHead,
       });
-      if (NetManager.mode === "client") {
-        // Don't apply damage locally — report to host
-        NetManager.clientReportHit({ targetId: hitSoldier.id, damage: dmg, head: isHead, weapon: muzzleColor });
-      } else {
-        hitSoldier.hp -= dmg;
-        if (hitSoldier.hp <= 0 && hitSoldier.alive) {
-          hitSoldier.alive = false;
-          this.state.kills += 1;
-          if (isHead) this.state.headshots += 1;
-          this.state.score += isHead ? 200 : 100;
-          this.state.blueScore += 1;
-          this.spawnRagdoll(hitSoldier);
-        }
+      hitSoldier.hp -= dmg;
+      if (hitSoldier.hp <= 0 && hitSoldier.alive) {
+        hitSoldier.alive = false;
+        this.state.kills += 1;
+        if (isHead) this.state.headshots += 1;
+        this.state.score += isHead ? 200 : 100;
+        this.state.blueScore += 1;
+        this.spawnRagdoll(hitSoldier);
       }
     }
   }
@@ -1086,8 +1047,6 @@ export class GameEngine {
 
     for (const s of this.state.soldiers) {
       if (!s.alive) continue;
-      // Skip AI for soldiers controlled by remote players (host applies their input separately)
-      if ((s as any).__remoteOwner) continue;
 
       const classSpec = CLASSES[s.soldierClass];
 

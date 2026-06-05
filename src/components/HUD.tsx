@@ -697,7 +697,7 @@ function Menu({ onStart, isMobile }: { onStart: () => void; isMobile: boolean })
           <div className="text-xs uppercase tracking-[0.4em] text-[hsl(var(--hud))]">24 vs 24 Skirmish</div>
           <h1 className="mt-2 text-4xl font-bold tracking-tight">DESERT STRIKE</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            あなたはBLUE分隊。RED軍より先にスコア達成で勝利。オンラインで友達のCPU枠を置き換えよう。
+            あなたはBLUE分隊。RED軍より先にスコア達成で勝利。
           </p>
         </div>
         <div className="mt-6 space-y-2 rounded border border-border/40 bg-background/60 p-4 text-sm">
@@ -723,8 +723,6 @@ function Menu({ onStart, isMobile }: { onStart: () => void; isMobile: boolean })
           )}
         </div>
 
-        <OnlinePanel />
-
         <button
           onClick={onStart}
           className="mt-4 w-full rounded bg-[hsl(var(--hud))] px-6 py-3 text-sm font-bold uppercase tracking-[0.3em] text-[hsl(var(--hud-foreground))] transition-transform hover:scale-[1.02] active:scale-[0.98]"
@@ -737,134 +735,6 @@ function Menu({ onStart, isMobile }: { onStart: () => void; isMobile: boolean })
           </p>
         )}
       </div>
-    </div>
-  );
-}
-
-function OnlinePanel() {
-  const [mode, setMode] = useState<"solo" | "host" | "client">("solo");
-  const [code, setCode] = useState("");
-  const [joinCode, setJoinCode] = useState("");
-  const [peers, setPeers] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  // Lazy-load NetManager so non-online users don't pay for it.
-  const netRef = useRef<typeof import("@/net/net").NetManager | null>(null);
-  const ensureNet = async () => {
-    if (!netRef.current) {
-      const mod = await import("@/net/net");
-      netRef.current = mod.NetManager;
-      mod.NetManager.onEvent = (ev) => {
-        if (ev.kind === "clientJoined" || ev.kind === "clientLeft") {
-          setPeers([...mod.NetManager.connectedPeers]);
-        } else if (ev.kind === "error") {
-          setErr(String(ev.data?.message || "error"));
-        }
-      };
-    }
-    return netRef.current!;
-  };
-
-  const host = async () => {
-    setBusy(true); setErr(null);
-    try {
-      const net = await ensureNet();
-      const id = await net.hostRoom();
-      setCode(id);
-      setMode("host");
-    } catch (e: any) {
-      setErr(e?.message || String(e));
-    }
-    setBusy(false);
-  };
-  const join = async () => {
-    if (!joinCode.trim()) return;
-    setBusy(true); setErr(null);
-    try {
-      const net = await ensureNet();
-      await net.joinRoom(joinCode.trim());
-      setMode("client");
-    } catch (e: any) {
-      setErr(e?.message || String(e));
-    }
-    setBusy(false);
-  };
-  const leave = async () => {
-    const net = netRef.current;
-    net?.leave();
-    setMode("solo");
-    setCode("");
-    setPeers([]);
-  };
-
-  return (
-    <div className="mt-5 rounded border border-[hsl(var(--accent)/0.4)] bg-background/40 p-3">
-      <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-widest">
-        <span className="text-[hsl(var(--accent))]">ONLINE</span>
-        <span className="text-muted-foreground">
-          {mode === "solo" ? "ソロ" : mode === "host" ? `ホスト (${peers.length}人接続中)` : "クライアント"}
-        </span>
-      </div>
-      {mode === "solo" && (
-        <div className="space-y-2">
-          <button
-            onClick={host}
-            disabled={busy}
-            className="w-full rounded border border-[hsl(var(--accent))] bg-transparent px-3 py-2 text-xs font-bold uppercase tracking-widest text-[hsl(var(--accent))] hover:bg-[hsl(var(--accent)/0.15)] disabled:opacity-50"
-          >
-            🏠 ルームを作る (ホスト)
-          </button>
-          <div className="flex gap-2">
-            <input
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value)}
-              placeholder="ルームコードを入力"
-              className="flex-1 rounded border border-border/50 bg-background/60 px-2 py-1 text-xs font-mono outline-none focus:border-[hsl(var(--accent))]"
-            />
-            <button
-              onClick={join}
-              disabled={busy || !joinCode.trim()}
-              className="rounded border border-[hsl(var(--accent))] bg-transparent px-3 py-1 text-xs font-bold uppercase tracking-widest text-[hsl(var(--accent))] hover:bg-[hsl(var(--accent)/0.15)] disabled:opacity-50"
-            >
-              参加
-            </button>
-          </div>
-          <p className="text-[9px] leading-snug text-muted-foreground">
-            ホストが先にDeploy→ルームコードを共有→他の人が参加してDeploy。CPUの枠が人間に置き換わります。
-          </p>
-        </div>
-      )}
-      {mode === "host" && (
-        <div className="space-y-2">
-          <div className="rounded bg-background/60 p-2">
-            <div className="text-[9px] uppercase text-muted-foreground">ルームコード (共有してください)</div>
-            <div className="mt-1 flex items-center gap-2">
-              <code className="flex-1 break-all rounded bg-background/80 px-2 py-1 text-[10px] font-mono">{code}</code>
-              <button
-                onClick={() => navigator.clipboard?.writeText(code)}
-                className="rounded border border-border/60 px-2 py-1 text-[10px] uppercase hover:bg-background/80"
-              >
-                Copy
-              </button>
-            </div>
-          </div>
-          <button onClick={leave} className="w-full rounded border border-border/60 px-3 py-1 text-[10px] uppercase tracking-widest hover:bg-background/80">
-            ルームを閉じる
-          </button>
-        </div>
-      )}
-      {mode === "client" && (
-        <div className="space-y-2">
-          <div className="rounded bg-background/60 p-2 text-[10px] text-muted-foreground">
-            ホストに接続済み。Deployでマッチに参加します。
-          </div>
-          <button onClick={leave} className="w-full rounded border border-border/60 px-3 py-1 text-[10px] uppercase tracking-widest hover:bg-background/80">
-            退出
-          </button>
-        </div>
-      )}
-      {err && <div className="mt-2 text-[10px] text-[hsl(var(--danger))]">⚠ {err}</div>}
     </div>
   );
 }

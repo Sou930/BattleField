@@ -1,6 +1,6 @@
 # BattleField
 
-A browser-based multiplayer battle game built with React, TypeScript, Vite, Three.js and PeerJS.
+A browser-based single-player battle game built with React, TypeScript, Vite and Three.js.
 
 ## Development
 
