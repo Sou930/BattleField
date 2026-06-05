@@ -50,6 +50,69 @@ function mulberry32(seed: number) {
 
 export const WORLD_SIZE = 720; // doubled large battlefield
 
+// Radius of the flat city core. Inside this the ground is leveled so the
+// streets, buildings and plaza sit on flat terrain; outside it the desert
+// rolls naturally.
+const CITY_FLAT_RADIUS = WORLD_SIZE * 0.48 * 0.58 + 18;
+
+// --- Deterministic value-noise field used for the continuous base terrain ---
+function hash2(ix: number, iz: number): number {
+  let h = ix * 374761393 + iz * 668265263;
+  h = (h ^ (h >>> 13)) >>> 0;
+  h = Math.imul(h, 1274126177) >>> 0;
+  return (h >>> 0) / 4294967296;
+}
+
+function smoothNoise(x: number, z: number): number {
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  const fx = x - ix;
+  const fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uz = fz * fz * (3 - 2 * fz);
+  const a = hash2(ix, iz);
+  const b = hash2(ix + 1, iz);
+  const c = hash2(ix, iz + 1);
+  const d = hash2(ix + 1, iz + 1);
+  return a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz;
+}
+
+// Fractal Brownian motion (several octaves of value noise) in [0,1].
+function fbm2(x: number, z: number): number {
+  let v = 0;
+  let amp = 0.5;
+  let freq = 1;
+  let norm = 0;
+  for (let o = 0; o < 4; o++) {
+    v += amp * smoothNoise(x * freq, z * freq);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.07;
+  }
+  return v / norm;
+}
+
+// Continuous, smoothly rolling base elevation of the desert. Flattens to 0
+// inside the city core so the urban area stays buildable and walkable.
+export function baseTerrainHeight(x: number, z: number): number {
+  // Large gentle dunes plus finer ripples.
+  const dunes = (fbm2(x * 0.0042 + 11.3, z * 0.0042 - 7.1) - 0.5) * 2; // [-1,1]
+  const ripples = (fbm2(x * 0.02 + 51.7, z * 0.02 + 23.9) - 0.5) * 2;
+  let h = dunes * 9.0 + ripples * 1.3;
+
+  // Flatten the city core: blend the elevation down to ~0 within the flat
+  // radius, easing back to full dunes a bit outside it.
+  const distFromCenter = Math.hypot(x, z);
+  const flatStart = CITY_FLAT_RADIUS;
+  const flatEnd = CITY_FLAT_RADIUS + 70;
+  let cityBlend = (distFromCenter - flatStart) / (flatEnd - flatStart);
+  cityBlend = Math.max(0, Math.min(1, cityBlend));
+  cityBlend = cityBlend * cityBlend * (3 - 2 * cityBlend); // smoothstep
+  h *= cityBlend;
+
+  return h;
+}
+
 const SAND_PALETTE = ["#c9a874", "#b89968", "#a98456", "#d4b585", "#b08858", "#8d6d44"];
 const ROOF_PALETTE = ["#7a5238", "#8a5e3e", "#6b4830", "#9a6a45"];
 
@@ -308,13 +371,14 @@ export function generateWorld(): World {
     barrels.push({ pos: p, color: colors[Math.floor(rng() * colors.length)] });
   }
 
-  // Low rolling hills and forest belts outside the city
-  for (let i = 0; i < 46; i++) {
+  // Broad, gentle mounds layered on top of the continuous desert base to add
+  // larger landmarks (ridges / dune crests) outside the city.
+  for (let i = 0; i < 38; i++) {
     const a = rng() * Math.PI * 2;
     const r = cityRadius + 25 + rng() * (WORLD_SIZE / 2 - cityRadius - 45);
-    const radius = 28 + rng() * 48;
-    const height = 0.8 + rng() * 2.2;
-    const pos = new THREE.Vector3(Math.cos(a) * r, -height * 0.18, Math.sin(a) * r);
+    const radius = 45 + rng() * 70;
+    const height = 3 + rng() * 7;
+    const pos = new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
     hills.push({ pos, radius, height, color: rng() > 0.45 ? "#8a7a54" : "#6f8152" });
   }
 
@@ -577,6 +641,31 @@ export function generateWorld(): World {
   for (const b of buildings) walls.push(...b.walls);
   walls.push(...perimeter);
 
+  // Ground height (base dunes + authored mounds) used to seat props on the
+  // rolling terrain. Mirrors terrainHeightAt() but without needing the World.
+  const groundAt = (x: number, z: number) => {
+    let h = baseTerrainHeight(x, z);
+    for (const hill of hills) {
+      const dx = x - hill.pos.x;
+      const dz = z - hill.pos.z;
+      const d = Math.hypot(dx, dz);
+      if (d < hill.radius) {
+        const t = 1 - d / hill.radius;
+        const smooth = t * t * (3 - 2 * t);
+        h += smooth * hill.height;
+      }
+    }
+    return h;
+  };
+
+  // Seat ground props onto the terrain so nothing floats or sinks.
+  for (const c of crates) c.pos.y += groundAt(c.pos.x, c.pos.z);
+  for (const b of barrels) b.pos.y += groundAt(b.pos.x, b.pos.z);
+  for (const p of palms) p.pos.y += groundAt(p.pos.x, p.pos.z);
+  for (const s of sandbags) s.pos.y += groundAt(s.pos.x, s.pos.z);
+  for (const t of tents) t.pos.y += groundAt(t.pos.x, t.pos.z);
+  for (const l of lamps) l.pos.y += groundAt(l.pos.x, l.pos.z);
+
   return {
     buildings,
     walls,
@@ -611,7 +700,10 @@ function insideAnyBuilding(p: THREE.Vector3, buildings: Building[], pad: number)
 }
 
 export function terrainHeightAt(world: World, x: number, z: number) {
-  let h = 0;
+  // Continuous rolling desert base (flat in the city core).
+  let h = baseTerrainHeight(x, z);
+  // Add the authored hills as broad, soft mounds on top of the base so the
+  // landscape reads as one continuous surface rather than isolated cones.
   for (const hill of world.hills) {
     const dx = x - hill.pos.x;
     const dz = z - hill.pos.z;
@@ -619,10 +711,10 @@ export function terrainHeightAt(world: World, x: number, z: number) {
     if (d < hill.radius) {
       const t = 1 - d / hill.radius;
       const smooth = t * t * (3 - 2 * t);
-      h = Math.max(h, smooth * hill.height);
+      h += smooth * hill.height;
     }
   }
-  return Math.min(3, h);
+  return h;
 }
 
 // Axis-aligned box collider
@@ -650,30 +742,33 @@ export function worldToBoxes(world: World): Box[] {
     });
   }
   for (const c of world.crates) {
+    const baseY = c.pos.y - c.size / 2;
     boxes.push({
-      min: new THREE.Vector3(c.pos.x - c.size / 2, 0, c.pos.z - c.size / 2),
-      max: new THREE.Vector3(c.pos.x + c.size / 2, c.size, c.pos.z + c.size / 2),
+      min: new THREE.Vector3(c.pos.x - c.size / 2, baseY, c.pos.z - c.size / 2),
+      max: new THREE.Vector3(c.pos.x + c.size / 2, baseY + c.size, c.pos.z + c.size / 2),
     });
   }
   for (const s of world.sandbags) {
+    const baseY = s.pos.y - s.size.y / 2;
     boxes.push({
       min: new THREE.Vector3(
         s.pos.x - s.size.x / 2,
-        0,
+        baseY,
         s.pos.z - s.size.z / 2,
       ),
       max: new THREE.Vector3(
         s.pos.x + s.size.x / 2,
-        s.size.y,
+        baseY + s.size.y,
         s.pos.z + s.size.z / 2,
       ),
       isLow: true,
     });
   }
   for (const b of world.barrels) {
+    const baseY = b.pos.y;
     boxes.push({
-      min: new THREE.Vector3(b.pos.x - 0.35, 0, b.pos.z - 0.35),
-      max: new THREE.Vector3(b.pos.x + 0.35, 1.1, b.pos.z + 0.35),
+      min: new THREE.Vector3(b.pos.x - 0.35, baseY, b.pos.z - 0.35),
+      max: new THREE.Vector3(b.pos.x + 0.35, baseY + 1.1, b.pos.z + 0.35),
     });
   }
   const f = world.fountainPos;

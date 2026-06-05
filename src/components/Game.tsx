@@ -6,7 +6,7 @@ import * as THREE from "three";
 import { GameEngine } from "@/game/engine";
 import { store, useGame } from "@/game/store";
 import { Input } from "@/game/input";
-import { generateWorld, WORLD_SIZE } from "@/game/world";
+import { generateWorld, WORLD_SIZE, terrainHeightAt } from "@/game/world";
 import HUD from "./HUD";
 import sandTexUrl from "@/assets/desert_sand.png";
 import stoneTexUrl from "@/assets/desert_stone.png";
@@ -87,7 +87,6 @@ function Scene({ engine }: { engine: GameEngine }) {
 
       <Sky />
       <Ground />
-      <TerrainHills />
       <Roads />
       <Walls />
       <Roofs />
@@ -272,10 +271,49 @@ function Ground() {
       `,
     });
   }, [sandTex]);
+
+  // Displaced height-field mesh so the whole desert is one continuous, rolling
+  // surface. The detailed playable area uses a dense grid; a large flat skirt
+  // extends to the horizon beyond it.
+  const geometry = useMemo(() => {
+    const extent = WORLD_SIZE * 1.5; // half-size of the detailed terrain patch
+    const segments = 220; // resolution of the displaced grid
+    const verts: number[] = [];
+    const idx: number[] = [];
+    for (let iz = 0; iz <= segments; iz++) {
+      for (let ix = 0; ix <= segments; ix++) {
+        const x = -extent + (ix / segments) * extent * 2;
+        const z = -extent + (iz / segments) * extent * 2;
+        const y = terrainHeightAt(sharedWorld, x, z);
+        verts.push(x, y, z);
+      }
+    }
+    const row = segments + 1;
+    for (let iz = 0; iz < segments; iz++) {
+      for (let ix = 0; ix < segments; ix++) {
+        const a = iz * row + ix;
+        const b = a + 1;
+        const c = a + row;
+        const d = c + 1;
+        idx.push(a, c, b, b, c, d);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+  }, []);
+
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow material={mat}>
-      <planeGeometry args={[WORLD_SIZE * 3, WORLD_SIZE * 3, 1, 1]} />
-    </mesh>
+    <group>
+      {/* Far flat skirt to the horizon (sits under the detailed patch edges) */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} material={mat}>
+        <planeGeometry args={[WORLD_SIZE * 6, WORLD_SIZE * 6, 1, 1]} />
+      </mesh>
+      {/* Detailed rolling terrain */}
+      <mesh geometry={geometry} receiveShadow material={mat} />
+    </group>
   );
 }
 
@@ -538,7 +576,7 @@ function Barrels() {
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
     items.forEach((b, i) => {
-      dummy.position.set(b.pos.x, 0.55, b.pos.z);
+      dummy.position.set(b.pos.x, b.pos.y + 0.55, b.pos.z);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
@@ -625,7 +663,7 @@ function Tents() {
   return (
     <group>
       {sharedWorld.tents.map((t, i) => (
-        <group key={i} position={[t.pos.x, 0, t.pos.z]} rotation={[0, (i * 0.7) % (Math.PI * 2), 0]}>
+        <group key={i} position={[t.pos.x, t.pos.y, t.pos.z]} rotation={[0, (i * 0.7) % (Math.PI * 2), 0]}>
           {/* poles */}
           {[
             [-1.2, -1.2],
@@ -691,7 +729,7 @@ function Lamps() {
   return (
     <group>
       {sharedWorld.lamps.map((l, i) => (
-        <group key={i} position={[l.pos.x, 0, l.pos.z]}>
+        <group key={i} position={[l.pos.x, l.pos.y, l.pos.z]}>
           <mesh position={[0, 1.6, 0]} castShadow geometry={poleGeo} material={poleMat} />
           <mesh position={[0, 3.2, 0]} geometry={bulbGeo} material={bulbMat} />
         </group>
@@ -750,45 +788,6 @@ function DistantHills() {
       ))}
     </group>
   );
-}
-
-function TerrainHills() {
-  const geometry = useMemo(() => {
-    const segments = 18;
-    const vertices: number[] = [];
-    const indices: number[] = [];
-    const groups: { start: number; color: string }[] = [];
-    for (const hill of sharedWorld.hills) {
-      groups.push({ start: indices.length, color: hill.color });
-      const base = vertices.length / 3;
-      vertices.push(hill.pos.x, 0.015 + hill.height, hill.pos.z);
-      for (let ring = 1; ring <= segments; ring++) {
-        const r01 = ring / segments;
-        const m = 1 - r01;
-        const y = 0.015 + hill.height * m * m * (3 - 2 * m);
-        for (let i = 0; i < segments; i++) {
-          const a = (i / segments) * Math.PI * 2;
-          vertices.push(hill.pos.x + Math.cos(a) * hill.radius * r01, y, hill.pos.z + Math.sin(a) * hill.radius * r01);
-        }
-      }
-      for (let i = 0; i < segments; i++) indices.push(base, base + 1 + i, base + 1 + ((i + 1) % segments));
-      for (let ring = 1; ring < segments; ring++) {
-        const prev = base + 1 + (ring - 1) * segments;
-        const curr = base + 1 + ring * segments;
-        for (let i = 0; i < segments; i++) {
-          const a = prev + i, b = prev + ((i + 1) % segments), c = curr + i, d = curr + ((i + 1) % segments);
-          indices.push(a, c, b, b, c, d);
-        }
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-    groups.forEach((g, i) => geo.addGroup(g.start, (groups[i + 1]?.start ?? indices.length) - g.start, i));
-    return { geo, materials: groups.map((g) => new THREE.MeshStandardMaterial({ color: g.color, roughness: 1 })) };
-  }, []);
-  return <mesh geometry={geometry.geo} material={geometry.materials} receiveShadow />;
 }
 
 function Awnings() {
