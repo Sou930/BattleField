@@ -68,35 +68,44 @@ function mulberry32(seed: number) {
 }
 
 // "Nellis AFB × Aleppo" fusion map. The world is split down the middle:
-//   * West half  -> Nellis Air Force Base (long runway, apron, hangars, tower)
-//   * East half  -> Aleppo old city (dense war-torn blocks + hilltop Citadel)
+//   * West half  -> ONE fused Nellis Air Force Base: the long operational
+//                   runway, taxiway and apron now sit *inside* the fortified
+//                   home-base compound (T-wall perimeter, gate, motor pool,
+//                   hangars, command + control tower, supply yard). The two
+//                   previously-separate base/runway facilities are merged.
+//   * East half  -> Aleppo old city (dense war-torn blocks + hilltop Citadel),
+//                   now expanded to fill the space freed by the fusion.
 // The map is enlarged to comfortably hold both districts side by side.
 export const WORLD_SIZE = 1480; // enlarged to host the airbase + city fusion
 
 // X coordinate that divides the airbase (west, x<0) from the ruined city
 // (east, x>0). A blast-wall corridor sits along this seam.
-export const DISTRICT_SEAM_X = 0;
+export const DISTRICT_SEAM_X = -WORLD_SIZE * 0.04;
 
 // --- Aleppo old-city core (east side) ------------------------------------
 // Center of the dense city grid and radius of the leveled urban area. Inside
-// this disc the ground is flattened so streets and buildings sit level.
-export const CITY_CENTER_X = WORLD_SIZE * 0.24;
-export const CITY_CENTER_Z = -WORLD_SIZE * 0.04;
-// Slightly larger flattened urban disc so the denser grid stays buildable.
-const CITY_FLAT_RADIUS = WORLD_SIZE * 0.23 + 18;
+// this disc the ground is flattened so streets and buildings sit level. The
+// urban area is EXPANDED: pushed a little east and grown in radius so it
+// occupies the larger eastern/southern half left open by fusing the bases.
+export const CITY_CENTER_X = WORLD_SIZE * 0.27;
+export const CITY_CENTER_Z = WORLD_SIZE * 0.02;
+// Larger flattened urban disc so the bigger, denser grid stays buildable.
+const CITY_FLAT_RADIUS = WORLD_SIZE * 0.3 + 22;
 
 // --- Aleppo Citadel (landmark hill-fortress on the city's NE) ------------
-export const CITADEL_X = WORLD_SIZE * 0.34;
-export const CITADEL_Z = -WORLD_SIZE * 0.26;
+export const CITADEL_X = WORLD_SIZE * 0.38;
+export const CITADEL_Z = -WORLD_SIZE * 0.28;
 const CITADEL_RADIUS = 120;
 const CITADEL_HEIGHT = 34;
 
-// --- Nellis airfield flat zone (west side) -------------------------------
-// The runway / taxiway / apron all need perfectly level ground.
-export const AIRFIELD_CENTER_X = -WORLD_SIZE * 0.24;
+// --- Fused Nellis airbase flat zone (west side) --------------------------
+// The runway / taxiway / apron and the whole fortified compound now share a
+// single dead-level rectangle on the west side. BASE_POS is anchored to this
+// same center so the home base and the airfield are one facility.
+export const AIRFIELD_CENTER_X = -WORLD_SIZE * 0.26;
 export const AIRFIELD_CENTER_Z = 0;
-const AIRFIELD_FLAT_HALF_X = WORLD_SIZE * 0.22;
-const AIRFIELD_FLAT_HALF_Z = WORLD_SIZE * 0.34;
+const AIRFIELD_FLAT_HALF_X = WORLD_SIZE * 0.24;
+const AIRFIELD_FLAT_HALF_Z = WORLD_SIZE * 0.4;
 
 // --- Deterministic value-noise field used for the continuous base terrain ---
 function hash2(ix: number, iz: number): number {
@@ -167,15 +176,17 @@ export function baseTerrainHeight(x: number, z: number): number {
   const fieldBlend = smoothstep01(fieldOutside);
   h *= fieldBlend;
 
-  // Flatten the home-base airbase compound near the south edge. The compound is
-  // a large rectangle, so flatten a rectangular footprint (plus a soft skirt)
-  // rather than a small disc — this keeps the apron, hangars and motor pool
-  // dead level and prevents terrain from poking up through the concrete.
+  // Flatten the fused airbase compound (runway + apron + walled base) on the
+  // west side. The compound is a tall rectangle, so flatten a rectangular
+  // footprint (plus a soft skirt) — this keeps the runway, apron, hangars and
+  // motor pool dead level and prevents terrain from poking up through the
+  // concrete. (This rectangle overlaps the airfield rectangle above, which is
+  // fine — both just drive h toward 0 over the same west-side zone.)
   const bdx = Math.abs(x - BASE_POS.x);
   const bdz = Math.abs(z - BASE_POS.z);
   const baseOutside = Math.max(
-    (bdx - (BASE_HALF + 6)) / 40,
-    (bdz - (BASE_HALF + 6)) / 40,
+    (bdx - (BASE_HALF_X + 8)) / 50,
+    (bdz - (BASE_HALF_Z + 8)) / 50,
   );
   h *= smoothstep01(baseOutside);
 
@@ -193,6 +204,11 @@ export function baseTerrainHeight(x: number, z: number): number {
 
 const SAND_PALETTE = ["#c9a874", "#b89968", "#a98456", "#d4b585", "#b08858", "#8d6d44"];
 const ROOF_PALETTE = ["#7a5238", "#8a5e3e", "#6b4830", "#9a6a45"];
+
+// Shared hangar colours (used by the fused airbase + the window decorator to
+// skip windowing the hangar shells).
+const HANGAR_COLOR = "#5d6b74";
+const HANGAR_ROOF = "#42505a";
 
 // Per-building metadata so the renderer can decorate facades with windows,
 // balconies and parapets that line up with the actual storeys.
@@ -487,213 +503,14 @@ export function generateWorld(): World {
   const containers: Container[] = [];
 
   // ======================================================================
-  //  NELLIS AIR FORCE BASE  (west half, x < DISTRICT_SEAM_X)
+  //  FUSED NELLIS AIRBASE  (west half) — built in buildBaseCompound()
   // ======================================================================
-  // A long north-south runway with a parallel taxiway, a concrete apron
-  // (flight line), rows of hangars, a control tower and jet-blast
-  // revetments. Rendered using the generic road / wall / building primitives.
-  const af = { x: AIRFIELD_CENTER_X, z: AIRFIELD_CENTER_Z };
-  const runwayLen = WORLD_SIZE * 0.6;
-  const runwayWidth = 30;
-
-  // Surface / marking paint heights. The airfield is dead-level, so the only
-  // thing keeping the runway visible above the terrain is the road decal's
-  // y-offset. Earlier the surface (0.01) and the terrain (0.0) were almost
-  // coplanar, so the runway z-fought with the sand and effectively "vanished"
-  // (looked buried) at a distance. Lift the asphalt clearly above the ground
-  // and stack the painted markings on distinct layers above that so nothing
-  // flickers.
-  const Y_SURFACE = 0.06; // asphalt / concrete pad
-  const Y_SHOULDER = 0.05; // shoulder pad (just under the runway edge)
-  const Y_PAINT = 0.12; // painted markings (centerline, edges, threshold)
-  const Y_PAINT2 = 0.14; // top paint layer (designation numbers)
-
-  // Sandy/graded shoulder strip running the length of the runway so the dark
-  // asphalt reads as a real runway sitting on a prepared bed rather than a bare
-  // stripe dropped on the desert.
-  roads.push({
-    pos: new THREE.Vector3(af.x, Y_SHOULDER, af.z),
-    size: new THREE.Vector3(runwayWidth + 22, 0.02, runwayLen + 24),
-    color: "#5a5247",
-  });
-
-  // Main runway (dark asphalt strip).
-  roads.push({
-    pos: new THREE.Vector3(af.x, Y_SURFACE, af.z),
-    size: new THREE.Vector3(runwayWidth, 0.02, runwayLen),
-    color: "#2f3236",
-  });
-  // Solid white edge stripes down both sides of the runway.
-  for (const side of [-1, 1]) {
-    roads.push({
-      pos: new THREE.Vector3(af.x + side * (runwayWidth / 2 - 1.0), Y_PAINT, af.z),
-      size: new THREE.Vector3(0.6, 0.02, runwayLen - 24),
-      color: "#e8e8dc",
-    });
-  }
-  // Painted runway centerline dashes.
-  const dashCount = 40;
-  for (let i = 0; i < dashCount; i++) {
-    const dz = -runwayLen / 2 + (i + 0.5) * (runwayLen / dashCount);
-    roads.push({
-      pos: new THREE.Vector3(af.x, Y_PAINT, af.z + dz),
-      size: new THREE.Vector3(1.0, 0.02, (runwayLen / dashCount) * 0.5),
-      color: "#d8d8c8",
-    });
-  }
-  // Threshold "piano key" bars at each runway end.
-  for (const end of [-1, 1]) {
-    for (let k = -3; k <= 3; k++) {
-      roads.push({
-        pos: new THREE.Vector3(af.x + k * 3, Y_PAINT, af.z + end * (runwayLen / 2 - 8)),
-        size: new THREE.Vector3(1.8, 0.02, 10),
-        color: "#e6e6da",
-      });
-    }
-    // Aiming-point markers (two thick bars) a little inboard of each threshold.
-    for (const side of [-1, 1]) {
-      roads.push({
-        pos: new THREE.Vector3(af.x + side * 3.2, Y_PAINT, af.z + end * (runwayLen / 2 - 34)),
-        size: new THREE.Vector3(2.6, 0.02, 14),
-        color: "#e6e6da",
-      });
-    }
-  }
-  // Big runway designation numbers ("18 / 36") painted near each end, built up
-  // from a few bars so the strip reads unmistakably as a runway from the air or
-  // the ground.
-  const drawDigitBars = (cx: number, cz: number, bars: [number, number, number, number][]) => {
-    for (const [ox, oz, w, d] of bars) {
-      roads.push({
-        pos: new THREE.Vector3(cx + ox, Y_PAINT2, cz + oz),
-        size: new THREE.Vector3(w, 0.02, d),
-        color: "#eeeee2",
-      });
-    }
-  };
-  // South end "18", north end "36" (simplified glyph blocks).
-  drawDigitBars(af.x - 3.2, af.z + runwayLen / 2 - 52, [[0, 0, 0.9, 7]]); // 1
-  drawDigitBars(af.x + 1.0, af.z + runwayLen / 2 - 52, [
-    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
-    [1.4, 1.5, 0.9, 3.0], [-1.4, -1.5, 0.9, 3.0],
-  ]); // 8 (approx)
-  drawDigitBars(af.x - 3.2, af.z - runwayLen / 2 + 52, [
-    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
-    [1.4, 1.5, 0.9, 3.0], [1.4, -1.5, 0.9, 3.0],
-  ]); // 3
-  drawDigitBars(af.x + 1.0, af.z - runwayLen / 2 + 52, [
-    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
-    [1.4, 0, 0.9, 6.0], [-1.4, 1.5, 0.9, 3.0],
-  ]); // 6
-
-  // Parallel taxiway east of the runway.
-  const taxiX = af.x + 60;
-  roads.push({
-    pos: new THREE.Vector3(taxiX, Y_SURFACE, af.z),
-    size: new THREE.Vector3(16, 0.02, runwayLen * 0.92),
-    color: "#3a3e44",
-  });
-  // Yellow taxiway centerline.
-  roads.push({
-    pos: new THREE.Vector3(taxiX, Y_PAINT, af.z),
-    size: new THREE.Vector3(0.5, 0.02, runwayLen * 0.9),
-    color: "#d6b73c",
-  });
-  // Connector taxiways linking runway and taxiway.
-  for (const cz of [-runwayLen * 0.32, 0, runwayLen * 0.32]) {
-    roads.push({
-      pos: new THREE.Vector3((af.x + taxiX) / 2, Y_SURFACE, af.z + cz),
-      size: new THREE.Vector3(taxiX - af.x, 0.02, 12),
-      color: "#3a3e44",
-    });
-    roads.push({
-      pos: new THREE.Vector3((af.x + taxiX) / 2, Y_PAINT, af.z + cz),
-      size: new THREE.Vector3(taxiX - af.x - 4, 0.02, 0.5),
-      color: "#d6b73c",
-    });
-  }
-
-  // Concrete apron / flight line east of the taxiway, where aircraft park.
-  const apronX = taxiX + 70;
-  const apronW = 110;
-  const apronD = runwayLen * 0.55;
-  roads.push({
-    pos: new THREE.Vector3(apronX, Y_SURFACE, af.z),
-    size: new THREE.Vector3(apronW, 0.02, apronD),
-    color: "#9a958a",
-  });
-  // Apron parking-spot outlines (rows of yellow boxes) so the flight line looks
-  // organised and detailed rather than a blank slab.
-  for (let r = 0; r < 6; r++) {
-    const pz = af.z - apronD / 2 + 30 + r * (apronD - 60) / 5;
-    roads.push({
-      pos: new THREE.Vector3(apronX, Y_PAINT, pz),
-      size: new THREE.Vector3(apronW - 26, 0.02, 0.4),
-      color: "#cdb24a",
-    });
-  }
-
-  // Hangars: large, low, wide buildings along the back (west) edge of the apron.
-  const hangarColor = "#5d6b74";
-  const hangarRoof = "#42505a";
-  for (let i = 0; i < 5; i++) {
-    const hz = af.z - apronD / 2 + 30 + i * (apronD - 60) / 4;
-    const hx = apronX - apronW / 2 - 22;
-    const hw = 34;
-    const hd = 26;
-    const hh = 12;
-    const walls2: Wall[] = [];
-    const wt = 0.6;
-    const halfW = hw / 2;
-    const halfD = hd / 2;
-    // side + back walls (front, facing apron at +x, left open as a hangar door)
-    walls2.push({ pos: new THREE.Vector3(hx - halfW, hh / 2, hz), size: new THREE.Vector3(wt, hh, hd), color: hangarColor, kind: "wall" });
-    walls2.push({ pos: new THREE.Vector3(hx, hh / 2, hz - halfD), size: new THREE.Vector3(hw, hh, wt), color: hangarColor, kind: "wall" });
-    walls2.push({ pos: new THREE.Vector3(hx, hh / 2, hz + halfD), size: new THREE.Vector3(hw, hh, wt), color: hangarColor, kind: "wall" });
-    // narrow front jambs either side of the big door opening (+x face)
-    const jamb = 5;
-    walls2.push({ pos: new THREE.Vector3(hx + halfW, hh / 2, hz - halfD + jamb / 2), size: new THREE.Vector3(wt, hh, jamb), color: hangarColor, kind: "wall" });
-    walls2.push({ pos: new THREE.Vector3(hx + halfW, hh / 2, hz + halfD - jamb / 2), size: new THREE.Vector3(wt, hh, jamb), color: hangarColor, kind: "wall" });
-    // curved-ish arched roof approximated by a flat slab + raised ridge
-    walls2.push({ pos: new THREE.Vector3(hx, hh + 0.4, hz), size: new THREE.Vector3(hw + 1, 0.8, hd + 1), color: hangarRoof, kind: "roof" });
-    walls2.push({ pos: new THREE.Vector3(hx, hh + 1.4, hz), size: new THREE.Vector3(hw * 0.6, 1.2, hd + 1), color: hangarRoof, kind: "roof" });
-    buildings.push({
-      walls: walls2,
-      min: new THREE.Vector3(hx - halfW, 0, hz - halfD),
-      max: new THREE.Vector3(hx + halfW, hh, hz + halfD),
-      info: { cx: hx, cz: hz, w: hw, d: hd, h: hh, floors: 1, floorH: hh, doorSide: 2, color: hangarColor, roofColor: hangarRoof, hasParapet: false },
-    });
-
-    // A parked "aircraft" silhouette on the apron in front of each hangar,
-    // suggested with low boxes (fuselage + wings) treated as cover crates.
-    const px = apronX - 10;
-    crates.push({ pos: new THREE.Vector3(px, 1.0, hz), size: 2.2, color: "#7a8088" });
-    crates.push({ pos: new THREE.Vector3(px + 4, 0.8, hz), size: 1.6, color: "#6f757d" });
-  }
-
-  // Control tower: a tall slim shaft topped with a cantilevered glass cab and
-  // an antenna mast — a recognisable ATC tower silhouette rather than two plain
-  // stacked boxes.
-  {
-    const tx = apronX + apronW / 2 - 16;
-    const tz = af.z + apronD / 2 - 24;
-    buildAirfieldTower(buildings, tx, tz, 0);
-  }
-
-  // Jet-blast revetments / fuel storage on the apron: rows of blast walls and
-  // fuel drums, reusing sandbag barriers + barrels.
-  for (let i = 0; i < 6; i++) {
-    const rz = af.z - apronD / 2 + 40 + i * (apronD - 80) / 5;
-    const rx = apronX + apronW / 2 - 36;
-    sandbags.push({ pos: new THREE.Vector3(rx, 1.4, rz), size: new THREE.Vector3(10, 2.8, 1.0), color: "#8a8f86", kind: "barrier" });
-    barrels.push({ pos: new THREE.Vector3(rx + 4, 0, rz + 2), color: "#3a3a3a" });
-    barrels.push({ pos: new THREE.Vector3(rx + 4, 0, rz - 2), color: "#7a4a1a" });
-  }
-
-  // Perimeter fence posts (lamps double as floodlight poles) around the field.
-  for (let i = -6; i <= 6; i++) {
-    lamps.push({ pos: new THREE.Vector3(af.x - AIRFIELD_FLAT_HALF_X * 0.7, 0, af.z + i * (runwayLen / 13)) });
-  }
+  // The standalone Nellis airfield and the separate fortified home base have
+  // been FUSED into a single facility. All of the airfield geometry (long
+  // runway, parallel taxiway, concrete apron, hangars, control tower, jet-blast
+  // revetments) plus the compound (T-wall perimeter, north gate, motor pool,
+  // command block, supply yard) is now produced together inside
+  // buildBaseCompound(), which is centred on AIRFIELD_CENTER via BASE_POS.
 
   // ======================================================================
   //  ALEPPO OLD CITY  (east half, x > DISTRICT_SEAM_X)
@@ -702,11 +519,15 @@ export function generateWorld(): World {
   // plaza around the central fountain, and the Citadel landmark on a hill.
   const cityCX = CITY_CENTER_X;
   const cityCZ = CITY_CENTER_Z;
-  const citySize = WORLD_SIZE * 0.46;
+  // EXPANDED urban footprint: the city grid now covers a much larger square so
+  // the dense quarter fills the eastern/southern half freed up by fusing the
+  // two bases into one west-side facility.
+  const citySize = WORLD_SIZE * 0.6;
   const cityRadius = CITY_FLAT_RADIUS - 8;
   // Denser grid: more, smaller blocks separated by narrow alleys, like a real
-  // medieval old-city quarter.
-  const cells = 20;
+  // medieval old-city quarter. The cell count is grown along with the footprint
+  // so the blocks stay the same size (just more of them) → a bigger city.
+  const cells = 26;
   const cellSize = citySize / cells;
   const plazaX = cityCX;
   const plazaZ = cityCZ;
@@ -831,7 +652,8 @@ export function generateWorld(): World {
   }
 
   // Wooden crates as cover, concentrated in the city, sparse in the desert.
-  for (let i = 0; i < 340; i++) {
+  // (Count raised to populate the enlarged urban footprint.)
+  for (let i = 0; i < 460; i++) {
     const s = 0.9 + rng() * 0.7;
     const inCity = rng() > 0.3;
     let px: number, pz: number;
@@ -865,29 +687,31 @@ export function generateWorld(): World {
     const px = (rng() - 0.5) * WORLD_SIZE * 0.9;
     const pz = (rng() - 0.5) * WORLD_SIZE * 0.9;
     // keep mounds out of the flat airfield and city
-    if (Math.abs(px - af.x) < AIRFIELD_FLAT_HALF_X + 30 && Math.abs(pz - af.z) < AIRFIELD_FLAT_HALF_Z + 30) continue;
+    if (Math.abs(px - AIRFIELD_CENTER_X) < AIRFIELD_FLAT_HALF_X + 30 && Math.abs(pz - AIRFIELD_CENTER_Z) < AIRFIELD_FLAT_HALF_Z + 30) continue;
     if (Math.hypot(px - cityCX, pz - cityCZ) < CITY_FLAT_RADIUS + 30) continue;
-    // Keep mounds out of the (flattened) home base too. Authored hills are
+    // Keep mounds out of the (flattened) fused airbase too. Authored hills are
     // added on top of the base terrain by terrainHeightAt(), so a mound here
     // would raise the ground *inside* the flattened compound and read as
-    // "terrain stacked on terrain" poking through the apron. The mound radius
-    // can reach ~115, so pad the exclusion generously.
+    // "terrain stacked on terrain" poking through the apron. The compound is a
+    // tall rectangle, so use its rectangular extents (padded for the mound
+    // radius, which can reach ~115).
     const baseR = 115 + 30;
-    if (Math.abs(px - BASE_POS.x) < BASE_HALF + baseR && Math.abs(pz - BASE_POS.z) < BASE_HALF + baseR) continue;
+    if (Math.abs(px - BASE_POS.x) < BASE_HALF_X + baseR && Math.abs(pz - BASE_POS.z) < BASE_HALF_Z + baseR) continue;
     const radius = 45 + rng() * 70;
     const height = 3 + rng() * 7;
     hills.push({ pos: new THREE.Vector3(px, 0, pz), radius, height, color: rng() > 0.45 ? "#8a7a54" : "#6f8152" });
   }
 
   // Trees: a few palms/poplars in city courtyards, scrub in the desert.
-  for (let i = 0; i < 230; i++) {
+  // (Count raised for the enlarged city.)
+  for (let i = 0; i < 300; i++) {
     const inCity = rng() > 0.5;
     const px = inCity ? cityCX + (rng() - 0.5) * citySize : (rng() - 0.5) * (WORLD_SIZE - 30);
     const pz = inCity ? cityCZ + (rng() - 0.5) * citySize : (rng() - 0.5) * (WORLD_SIZE - 30);
     const p = new THREE.Vector3(px, 0, pz);
     if (insideAnyBuilding(p, buildings, 1)) continue;
     // keep trees off the runway/apron
-    if (Math.abs(px - af.x) < AIRFIELD_FLAT_HALF_X && Math.abs(pz - af.z) < AIRFIELD_FLAT_HALF_Z) continue;
+    if (Math.abs(px - AIRFIELD_CENTER_X) < AIRFIELD_FLAT_HALF_X && Math.abs(pz - AIRFIELD_CENTER_Z) < AIRFIELD_FLAT_HALF_Z) continue;
     palms.push({ pos: p, height: 4 + rng() * 3 });
   }
 
@@ -929,8 +753,10 @@ export function generateWorld(): World {
     roads.push({ pos: new THREE.Vector3(cityCX, 0.01, cityCZ + i * cellSize), size: new THREE.Vector3(citySize, 0.02, lane), color: laneColor });
     roads.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0.01, cityCZ), size: new THREE.Vector3(lane, 0.02, citySize), color: laneColor });
   }
-  // A long approach road linking the airfield apron to the city.
-  roads.push({ pos: new THREE.Vector3((apronX + cityCX) / 2, 0.01, 0), size: new THREE.Vector3(cityCX - apronX, 0.02, 9), color: "#5a4d34" });
+  // A long approach road linking the fused airbase (its east perimeter) to the
+  // city, so the player can drive out of the gate and into the urban district.
+  const baseEastEdge = BASE_POS.x + BASE_HALF_X;
+  roads.push({ pos: new THREE.Vector3((baseEastEdge + cityCX) / 2, 0.01, cityCZ), size: new THREE.Vector3(cityCX - baseEastEdge, 0.02, 9), color: "#5a4d34" });
 
   // Market tents — two denser rings around the central fountain plaza,
   // forming a busy souk.
@@ -944,9 +770,10 @@ export function generateWorld(): World {
     tents.push({ pos: new THREE.Vector3(tx, 0, tz), color: tentColors[Math.floor(rng() * tentColors.length)] });
   }
 
-  // Street lamps along the city's main roads (now reaching further out to line
-  // the denser grid).
-  for (let i = -8; i <= 8; i++) {
+  // Street lamps along the city's main roads (reaching out across the enlarged
+  // grid so the whole expanded quarter is lit).
+  const lampReach = Math.min(halfCells, 11);
+  for (let i = -lampReach; i <= lampReach; i++) {
     if (i === 0) continue;
     lamps.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0, cityCZ + 4) });
     lamps.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0, cityCZ - 4) });
@@ -973,7 +800,7 @@ export function generateWorld(): World {
   const tentColors2 = ["#b04030", "#3060a0", "#a08030", "#6a4030", "#8a6020"];
   for (const b of buildings) {
     if (!b.info) continue;
-    if (b.info.color === hangarColor) continue; // hangars have no windows
+    if (b.info.color === HANGAR_COLOR) continue; // hangars have no windows
     const { cx, cz, w: bw, d: bd, floors, floorH, doorSide } = b.info;
     const nx = Math.max(1, Math.floor(bw / 3.2));
     const nz = Math.max(1, Math.floor(bd / 3.2));
@@ -1124,19 +951,26 @@ export function generateWorld(): World {
   };
 }
 
-// === HOME BASE (forward operating airbase) ================================
-// Center of the walled home base, placed near the south edge of the expanded
-// map (just inside the perimeter wall). The compound is a large fortified
-// airbase: a concrete apron with a control tower + command block, a row of
-// hangars, a packed motor pool of parked armour, fuel/ammo storage and a
-// T-wall + container perimeter. The north side (facing the battlefield / -z)
-// has a wide gate so vehicles can drive out.
-export const BASE_POS = new THREE.Vector3(0, 0, WORLD_SIZE / 2 - 120);
-export const BASE_HALF = 92; // half-extent of the square compound (greatly enlarged)
+// === FUSED HOME AIRBASE ====================================================
+// The home base and the Nellis airfield are now ONE facility. The fortified
+// compound (T-wall perimeter, gate, motor pool, hangars, command block,
+// control tower, supply yard) is centred on the airfield, so the long
+// operational runway + taxiway + apron sit *inside* the walled base. The
+// compound is a tall rectangle (north-south) that wraps the runway with the
+// gate on the north wall (facing the city / battlefield).
+export const BASE_POS = new THREE.Vector3(AIRFIELD_CENTER_X, 0, AIRFIELD_CENTER_Z);
+// Half-extents of the (now rectangular) compound: wide enough to hold the
+// runway + taxiway + apron, tall enough to span most of the runway length.
+export const BASE_HALF = 150; // legacy square half-extent (kept for terrain skirt + spawns)
+export const BASE_HALF_X = 200; // east-west half extent (runway + taxiway + apron)
+export const BASE_HALF_Z = 320; // north-south half extent (along the runway)
 
-// Build the home-base airbase compound: perimeter T-walls plus all the
-// authored structures and motor-pool dressing. Returns the collidable wall
-// segments; buildings / vehicles / props are pushed into the shared arrays.
+// Build the FUSED Nellis airbase: one walled compound that contains the full
+// operational airfield (long runway, parallel taxiway, connector taxiways,
+// concrete apron, hangar row, control tower + command block, jet-blast
+// revetments) PLUS the fortified home-base dressing (T-wall perimeter, north
+// gate, packed motor pool, supply yard). Returns the collidable wall segments;
+// buildings / vehicles / props are pushed into the shared arrays.
 function buildBaseCompound(
   rng: () => number,
   buildings: Building[],
@@ -1151,116 +985,193 @@ function buildBaseCompound(
   const walls: Wall[] = [];
   const cx = BASE_POS.x;
   const cz = BASE_POS.z;
-  const half = BASE_HALF;
+  const halfX = BASE_HALF_X; // east-west
+  const halfZ = BASE_HALF_Z; // north-south (runway runs along z)
+
+  // Surface / marking paint heights (lifted clearly above the flattened sand so
+  // nothing z-fights / "vanishes").
+  const APRON_Y = 0.05;
+  const Y_SHOULDER = 0.06;
+  const Y_SURFACE = 0.08;
+  const PAINT_Y = 0.16;
+  const PAINT2_Y = 0.18;
 
   // --- Concrete apron covering the whole compound floor ------------------
-  // Rendered as a thin road decal (NOT a solid floor box) so it sits flush on
-  // the flattened terrain instead of stacking a second slab of "ground" on top
-  // of it. The decal is also excluded from collision, so the player no longer
-  // bumps an invisible curb when walking across the compound.
-  //
-  // The apron is lifted clearly above the (flattened) terrain. Previously it
-  // sat at y=0.02 — almost coplanar with the sand — so it z-fought and the
-  // concrete effectively "vanished", leaving the compound looking like bare
-  // desert with the runway buried. The new height stack puts the pad well above
-  // the ground and the painted markings above that.
-  const APRON_Y = 0.05;
-  const PAINT_Y = 0.16;
+  // Thin road decal (not a collidable floor box) so it sits flush on the
+  // flattened terrain and the player can walk across freely.
   roads.push({
     pos: new THREE.Vector3(cx, APRON_Y, cz),
-    size: new THREE.Vector3(half * 2 - 2, 0.02, half * 2 - 2),
+    size: new THREE.Vector3(halfX * 2 - 2, 0.02, halfZ * 2 - 2),
     color: "#9a958a",
   });
 
-  // --- Operational runway down the middle of the compound ----------------
-  // A dark asphalt runway runs north-south through the base so it reads as a
-  // working forward airbase (and the player has an obvious open landing strip).
-  const rwW = 26;
-  const rwLen = half * 2 - 24;
-  // Shoulder bed under the runway.
+  // --- Main operational runway (west side of the compound) ---------------
+  // A long north-south runway. The big east apron sits to its right.
+  const rwX = cx - halfX * 0.46;
+  const rwW = 30;
+  const rwLen = halfZ * 2 - 30;
+  // Sandy graded shoulder bed under the runway.
   roads.push({
-    pos: new THREE.Vector3(cx - half * 0.32, APRON_Y + 0.03, cz),
-    size: new THREE.Vector3(rwW + 14, 0.02, rwLen + 10),
+    pos: new THREE.Vector3(rwX, Y_SHOULDER, cz),
+    size: new THREE.Vector3(rwW + 22, 0.02, rwLen + 24),
     color: "#5a5247",
   });
-  // Asphalt surface.
+  // Dark asphalt surface.
   roads.push({
-    pos: new THREE.Vector3(cx - half * 0.32, APRON_Y + 0.06, cz),
+    pos: new THREE.Vector3(rwX, Y_SURFACE, cz),
     size: new THREE.Vector3(rwW, 0.02, rwLen),
     color: "#2f3236",
   });
-  // Centerline dashes.
-  const baseDashes = 22;
-  for (let i = 0; i < baseDashes; i++) {
-    const dz = -rwLen / 2 + (i + 0.5) * (rwLen / baseDashes);
-    roads.push({
-      pos: new THREE.Vector3(cx - half * 0.32, PAINT_Y, cz + dz),
-      size: new THREE.Vector3(0.9, 0.02, (rwLen / baseDashes) * 0.5),
-      color: "#d8d8c8",
-    });
-  }
-  // Edge stripes.
+  // Solid white edge stripes.
   for (const side of [-1, 1]) {
     roads.push({
-      pos: new THREE.Vector3(cx - half * 0.32 + side * (rwW / 2 - 0.9), PAINT_Y, cz),
-      size: new THREE.Vector3(0.5, 0.02, rwLen - 14),
+      pos: new THREE.Vector3(rwX + side * (rwW / 2 - 1.0), PAINT_Y, cz),
+      size: new THREE.Vector3(0.6, 0.02, rwLen - 24),
       color: "#e8e8dc",
     });
   }
-  // Threshold piano-keys at both ends.
+  // Centerline dashes.
+  const dashCount = 44;
+  for (let i = 0; i < dashCount; i++) {
+    const dz = -rwLen / 2 + (i + 0.5) * (rwLen / dashCount);
+    roads.push({
+      pos: new THREE.Vector3(rwX, PAINT_Y, cz + dz),
+      size: new THREE.Vector3(1.0, 0.02, (rwLen / dashCount) * 0.5),
+      color: "#d8d8c8",
+    });
+  }
+  // Threshold piano-keys + aiming-point bars at each end.
   for (const end of [-1, 1]) {
     for (let k = -3; k <= 3; k++) {
       roads.push({
-        pos: new THREE.Vector3(cx - half * 0.32 + k * 2.6, PAINT_Y, cz + end * (rwLen / 2 - 6)),
-        size: new THREE.Vector3(1.5, 0.02, 8),
+        pos: new THREE.Vector3(rwX + k * 3, PAINT_Y, cz + end * (rwLen / 2 - 8)),
+        size: new THREE.Vector3(1.8, 0.02, 10),
+        color: "#e6e6da",
+      });
+    }
+    for (const side of [-1, 1]) {
+      roads.push({
+        pos: new THREE.Vector3(rwX + side * 3.2, PAINT_Y, cz + end * (rwLen / 2 - 34)),
+        size: new THREE.Vector3(2.6, 0.02, 14),
         color: "#e6e6da",
       });
     }
   }
+  // Runway designation numbers ("18 / 36") built from glyph bars near each end.
+  const drawDigitBars = (gx: number, gz: number, bars: [number, number, number, number][]) => {
+    for (const [ox, oz, w, d] of bars) {
+      roads.push({
+        pos: new THREE.Vector3(gx + ox, PAINT2_Y, gz + oz),
+        size: new THREE.Vector3(w, 0.02, d),
+        color: "#eeeee2",
+      });
+    }
+  };
+  drawDigitBars(rwX - 3.2, cz + rwLen / 2 - 52, [[0, 0, 0.9, 7]]); // 1
+  drawDigitBars(rwX + 1.0, cz + rwLen / 2 - 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 1.5, 0.9, 3.0], [-1.4, -1.5, 0.9, 3.0],
+  ]); // 8
+  drawDigitBars(rwX - 3.2, cz - rwLen / 2 + 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 1.5, 0.9, 3.0], [1.4, -1.5, 0.9, 3.0],
+  ]); // 3
+  drawDigitBars(rwX + 1.0, cz - rwLen / 2 + 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 0, 0.9, 6.0], [-1.4, 1.5, 0.9, 3.0],
+  ]); // 6
+
+  // --- Parallel taxiway east of the runway -------------------------------
+  const taxiX = rwX + 56;
+  roads.push({
+    pos: new THREE.Vector3(taxiX, Y_SURFACE, cz),
+    size: new THREE.Vector3(16, 0.02, rwLen * 0.92),
+    color: "#3a3e44",
+  });
+  roads.push({
+    pos: new THREE.Vector3(taxiX, PAINT_Y, cz),
+    size: new THREE.Vector3(0.5, 0.02, rwLen * 0.9),
+    color: "#d6b73c",
+  });
+  // Connector taxiways linking the runway and the taxiway.
+  for (const dz of [-rwLen * 0.32, 0, rwLen * 0.32]) {
+    roads.push({
+      pos: new THREE.Vector3((rwX + taxiX) / 2, Y_SURFACE, cz + dz),
+      size: new THREE.Vector3(taxiX - rwX, 0.02, 12),
+      color: "#3a3e44",
+    });
+    roads.push({
+      pos: new THREE.Vector3((rwX + taxiX) / 2, PAINT_Y, cz + dz),
+      size: new THREE.Vector3(taxiX - rwX - 4, 0.02, 0.5),
+      color: "#d6b73c",
+    });
+  }
+
+  // --- Flight-line apron east of the taxiway, with parking-spot outlines --
+  const apronX = taxiX + 64;
+  const apronW = 120;
+  const apronD = rwLen * 0.7;
+  roads.push({
+    pos: new THREE.Vector3(apronX, Y_SURFACE, cz),
+    size: new THREE.Vector3(apronW, 0.02, apronD),
+    color: "#9a958a",
+  });
+  for (let r = 0; r < 7; r++) {
+    const pz = cz - apronD / 2 + 30 + r * (apronD - 60) / 6;
+    roads.push({
+      pos: new THREE.Vector3(apronX, PAINT_Y, pz),
+      size: new THREE.Vector3(apronW - 26, 0.02, 0.4),
+      color: "#cdb24a",
+    });
+  }
 
   // --- Perimeter T-wall (concrete blast wall) with a north gate ----------
+  // The gate faces the city / battlefield (-z) so vehicles drive out toward
+  // the urban district.
   const wallH = 5.5;
   const wallT = 1.4;
   const wallColor = "#9a958c";
-  const gate = 22; // wide vehicle gate on the north wall
-  // South wall (full, facing the map edge)
-  walls.push({ pos: new THREE.Vector3(cx, wallH / 2, cz + half), size: new THREE.Vector3(half * 2, wallH, wallT), color: wallColor, kind: "wall" });
-  // East + West walls (full)
-  walls.push({ pos: new THREE.Vector3(cx + half, wallH / 2, cz), size: new THREE.Vector3(wallT, wallH, half * 2), color: wallColor, kind: "wall" });
-  walls.push({ pos: new THREE.Vector3(cx - half, wallH / 2, cz), size: new THREE.Vector3(wallT, wallH, half * 2), color: wallColor, kind: "wall" });
+  const gate = 24; // wide vehicle gate on the north wall
+  // South wall (faces the map edge).
+  walls.push({ pos: new THREE.Vector3(cx, wallH / 2, cz + halfZ), size: new THREE.Vector3(halfX * 2, wallH, wallT), color: wallColor, kind: "wall" });
+  // East + West walls (full length along z).
+  walls.push({ pos: new THREE.Vector3(cx + halfX, wallH / 2, cz), size: new THREE.Vector3(wallT, wallH, halfZ * 2), color: wallColor, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(cx - halfX, wallH / 2, cz), size: new THREE.Vector3(wallT, wallH, halfZ * 2), color: wallColor, kind: "wall" });
   // North wall split into two segments leaving a central gate.
-  const sideLen = half - gate / 2;
+  const sideLen = halfX - gate / 2;
   if (sideLen > 0.1) {
-    walls.push({ pos: new THREE.Vector3(cx - (gate / 2 + sideLen / 2), wallH / 2, cz - half), size: new THREE.Vector3(sideLen, wallH, wallT), color: wallColor, kind: "wall" });
-    walls.push({ pos: new THREE.Vector3(cx + (gate / 2 + sideLen / 2), wallH / 2, cz - half), size: new THREE.Vector3(sideLen, wallH, wallT), color: wallColor, kind: "wall" });
+    walls.push({ pos: new THREE.Vector3(cx - (gate / 2 + sideLen / 2), wallH / 2, cz - halfZ), size: new THREE.Vector3(sideLen, wallH, wallT), color: wallColor, kind: "wall" });
+    walls.push({ pos: new THREE.Vector3(cx + (gate / 2 + sideLen / 2), wallH / 2, cz - halfZ), size: new THREE.Vector3(sideLen, wallH, wallT), color: wallColor, kind: "wall" });
   }
   // Gate pillars either side of the opening.
   for (const sx of [-1, 1]) {
-    walls.push({ pos: new THREE.Vector3(cx + sx * gate / 2, wallH / 2 + 0.6, cz - half), size: new THREE.Vector3(2.2, wallH + 1.2, 2.6), color: "#8a857c", kind: "pillar" });
+    walls.push({ pos: new THREE.Vector3(cx + sx * gate / 2, wallH / 2 + 0.6, cz - halfZ), size: new THREE.Vector3(2.2, wallH + 1.2, 2.6), color: "#8a857c", kind: "pillar" });
   }
-  // Floodlight poles spaced along the inside of the perimeter.
-  for (let i = -2; i <= 2; i++) {
-    lamps.push({ pos: new THREE.Vector3(cx + i * (half * 0.85 / 2), 0, cz + half - 4) });
-    lamps.push({ pos: new THREE.Vector3(cx - half + 4, 0, cz + i * (half * 0.85 / 2)) });
-    lamps.push({ pos: new THREE.Vector3(cx + half - 4, 0, cz + i * (half * 0.85 / 2)) });
+  // Floodlight poles spaced along the inside of the (now longer) perimeter.
+  for (let i = -3; i <= 3; i++) {
+    lamps.push({ pos: new THREE.Vector3(cx + i * (halfX * 0.85 / 3), 0, cz + halfZ - 4) });
+    lamps.push({ pos: new THREE.Vector3(cx + i * (halfX * 0.85 / 3), 0, cz - halfZ + 4) });
+  }
+  for (let i = -3; i <= 3; i++) {
+    lamps.push({ pos: new THREE.Vector3(cx - halfX + 4, 0, cz + i * (halfZ * 0.85 / 3)) });
+    lamps.push({ pos: new THREE.Vector3(cx + halfX - 4, 0, cz + i * (halfZ * 0.85 / 3)) });
   }
 
-  // --- Control tower + command building (south-east corner) --------------
-  const towerX = cx + half * 0.5;
-  const towerZ = cz + half * 0.45;
-  const cmd = makeBuilding(rng, towerX - 16, towerZ, 26, 18, STOREY_HEIGHT * 3);
+  // --- Control tower + command building (east edge, by the apron) --------
+  const towerX = apronX + apronW / 2 - 18;
+  const towerZ = cz + apronD / 2 - 30;
+  const cmd = makeBuilding(rng, towerX - 18, towerZ, 26, 18, STOREY_HEIGHT * 3);
   buildings.push(cmd);
-  // Detailed ATC tower: tapered shaft + cantilevered glass cab + railing +
-  // antenna mast (shared with the Nellis airfield tower).
   buildAirfieldTower(buildings, towerX, towerZ, 0);
 
-  // --- Row of hangars along the west wall, doors facing the apron (+x) ----
-  const hangarColor = "#5d6b74";
-  const hangarRoof = "#42505a";
-  for (let i = 0; i < 3; i++) {
-    const hz = cz - half * 0.5 + i * (half * 0.9 / 2);
-    const hx = cx - half + 24;
-    const hw = 34, hd = 24, hh = 12;
+  // --- Row of hangars along the back (west) edge of the apron ------------
+  const hangarColor = HANGAR_COLOR;
+  const hangarRoof = HANGAR_ROOF;
+  const hangarCount = 6;
+  for (let i = 0; i < hangarCount; i++) {
+    const hz = cz - apronD / 2 + 34 + i * (apronD - 68) / (hangarCount - 1);
+    const hx = apronX - apronW / 2 - 22;
+    const hw = 34, hd = 26, hh = 12;
     const hWalls: Wall[] = [];
     const wt = 0.6;
     const hW2 = hw / 2, hD2 = hd / 2;
@@ -1278,17 +1189,22 @@ function buildBaseCompound(
       max: new THREE.Vector3(hx + hW2, hh, hz + hD2),
       info: { cx: hx, cz: hz, w: hw, d: hd, h: hh, floors: 1, floorH: hh, doorSide: 2, color: hangarColor, roofColor: hangarRoof, hasParapet: false },
     });
+
+    // A parked "aircraft" silhouette on the apron in front of each hangar.
+    const px = apronX - apronW / 2 + 14;
+    crates.push({ pos: new THREE.Vector3(px, 1.0, hz), size: 2.2, color: "#7a8088" });
+    crates.push({ pos: new THREE.Vector3(px + 4, 0.8, hz), size: 1.6, color: "#6f757d" });
   }
 
   // --- Motor pool: organized rows of parked armour on the apron ----------
-  // Mirrors the reference image: neat parallel rows of tanks, APCs, trucks
-  // and humvees facing the gate (north). Camo sand/olive palette.
+  // Neat parallel rows of tanks, APCs, trucks and humvees facing the gate
+  // (north). Camo sand/olive palette. Placed on the south part of the apron.
   const camo = ["#7c7355", "#6f6a4a", "#857a58", "#5f6347", "#8a7f5d"];
   const rowKinds: ParkedVehicle["kind"][] = ["tank", "apc", "humvee", "truck"];
-  const poolX0 = cx - 6;          // left edge of the motor pool
-  const poolZ0 = cz - half * 0.55; // front (north) edge
-  const cols = 5;
-  const rows = 6;
+  const poolX0 = apronX - apronW / 2 + 34; // left edge of the motor pool
+  const poolZ0 = cz + 30;                  // front (north) edge
+  const cols = 6;
+  const rows = 7;
   const colGap = 13;
   const rowGap = 12;
   for (let r = 0; r < rows; r++) {
@@ -1296,7 +1212,8 @@ function buildBaseCompound(
     for (let c = 0; c < cols; c++) {
       const px = poolX0 + c * colGap;
       const pz = poolZ0 + r * rowGap;
-      if (px > cx + half - 10) continue;
+      if (px > apronX + apronW / 2 - 10) continue;
+      if (pz > cz + halfZ - 14) continue;
       parkedVehicles.push({
         pos: new THREE.Vector3(px, 0, pz),
         yaw: Math.PI, // face north (toward the gate / battlefield)
@@ -1306,11 +1223,11 @@ function buildBaseCompound(
     }
   }
 
-  // --- Supply yard: shipping containers + crates near the south-west -----
+  // --- Supply yard: shipping containers + crates near the south-east -----
   const contColors = ["#5a6b4a", "#7a6a3a", "#6a5a4a", "#4a5a6a", "#7c5436"];
-  for (let i = 0; i < 10; i++) {
-    const stackX = cx - half + 16 + (i % 5) * 7;
-    const stackZ = cz + half - 14 - Math.floor(i / 5) * 8;
+  for (let i = 0; i < 12; i++) {
+    const stackX = apronX - 40 + (i % 6) * 7;
+    const stackZ = cz + halfZ - 18 - Math.floor(i / 6) * 8;
     const tall = rng() < 0.3;
     containers.push({
       pos: new THREE.Vector3(stackX, tall ? 5.0 : 0, stackZ),
@@ -1330,14 +1247,14 @@ function buildBaseCompound(
   // Stacked supply crates against the south wall.
   for (let i = 0; i < 24; i++) {
     const px = cx + 6 + (i % 8) * 2.0;
-    const pz = cz + half - 6 - Math.floor(i / 8) * 2.0;
+    const pz = cz + halfZ - 6 - Math.floor(i / 8) * 2.0;
     crates.push({ pos: new THREE.Vector3(px, 0.6, pz), size: 1.1, color: "#7a5028" });
   }
 
-  // --- Fuel / ammo storage: drums + revetment blast walls (east side) ----
-  for (let i = 0; i < 5; i++) {
-    const rz = cz - half * 0.4 + i * (half * 0.8 / 4);
-    const rx = cx + half - 18;
+  // --- Fuel / ammo storage: drums + revetment blast walls (east apron) ---
+  for (let i = 0; i < 6; i++) {
+    const rz = cz - apronD * 0.4 + i * (apronD * 0.8 / 5);
+    const rx = apronX + apronW / 2 - 30;
     sandbags.push({ pos: new THREE.Vector3(rx, 1.6, rz), size: new THREE.Vector3(11, 3.2, 1.1), color: "#8a8f86", kind: "barrier" });
     for (let d = 0; d < 4; d++) {
       barrels.push({ pos: new THREE.Vector3(rx + 4 + (d % 2) * 0.9, 0, rz - 2 + d * 1.0), color: d % 2 ? "#3a3a3a" : "#7a4a1a" });
@@ -1666,7 +1583,8 @@ export function buildMapData(world: World): MapData {
 
   const landmarks: MapLandmark[] = [
     { x: CITY_CENTER_X, z: CITY_CENTER_Z, name: "CITY" },
-    { x: AIRFIELD_CENTER_X, z: AIRFIELD_CENTER_Z, name: "AIRFIELD" },
+    // The airfield and home base are now one fused facility.
+    { x: BASE_POS.x, z: BASE_POS.z, name: "AIRBASE" },
     { x: CITADEL_X, z: CITADEL_Z, name: "CITADEL" },
   ];
 

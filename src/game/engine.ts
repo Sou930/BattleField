@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GameState, store } from "./store";
 import type { World } from "./world";
-import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS } from "./world";
+import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS, BASE_HALF_Z } from "./world";
 import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, makeWeaponState } from "./weapons";
 import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass } from "./types";
 import { CLASSES } from "./classes";
@@ -144,13 +144,16 @@ export class GameEngine {
       });
     };
 
-    // Drivable jeeps just outside the base gate and forward in the field, plus
-    // a tank staged outside the gate facing the battlefield.
-    pushVehicle("jeep", -14, BASE_POS.z - 40, 0);
-    pushVehicle("jeep", 14, BASE_POS.z - 40, 0);
+    // Drivable jeeps just outside the fused airbase's north gate (which faces
+    // the city / battlefield), plus a tank staged a little further out facing
+    // toward the urban district. The gate sits at the north wall of the
+    // compound: (BASE_POS.x, BASE_POS.z - BASE_HALF_Z).
+    const gateZ = BASE_POS.z - BASE_HALF_Z;
+    pushVehicle("jeep", BASE_POS.x - 14, gateZ - 26, 0);
+    pushVehicle("jeep", BASE_POS.x + 14, gateZ - 26, 0);
     pushVehicle("jeep", -30, -half + 35, 0);
     pushVehicle("jeep", 30, -half + 35, 0);
-    pushVehicle("tank", 0, BASE_POS.z - 100, Math.PI);
+    pushVehicle("tank", BASE_POS.x, gateZ - 70, Math.PI);
 
     // Every vehicle in the base motor pool is now drivable: convert each parked
     // vehicle into a real, enterable vehicle (and stop drawing the static prop
@@ -186,7 +189,10 @@ export class GameEngine {
     //  2) Base spawn: inside the walled home base near the expanded map's edge
     //     (where the tank is parked).
     this.spawnPoints = [
-      { name: "FORWARD", pos: this.findSpawnNear(0, WORLD_SIZE / 2 - 130, 25) },
+      // Forward spawn: just outside the fused airbase's north gate, pushed
+      // toward the city so the player starts heading into the battlefield.
+      { name: "FORWARD", pos: this.findSpawnNear(BASE_POS.x + 20, BASE_POS.z - BASE_HALF_Z - 40, 25) },
+      // Base spawn: deep inside the walled compound (on the apron).
       { name: "BASE", pos: this.findSpawnNear(BASE_POS.x, BASE_POS.z, 14) },
     ];
     // Player starts at the home base by default.
