@@ -1683,6 +1683,89 @@ function BulletTrails() {
 }
 
 // === VEHICLES ===
+function buildJeepMesh(mesh: THREE.Group) {
+  // Body
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(2.2, 0.8, 3.6),
+    new THREE.MeshStandardMaterial({ color: '#4a6a3a', roughness: 0.7 }),
+  );
+  body.position.y = 0.4;
+  body.castShadow = true;
+  mesh.add(body);
+  // Cabin
+  const cabin = new THREE.Mesh(
+    new THREE.BoxGeometry(1.8, 0.7, 1.6),
+    new THREE.MeshStandardMaterial({ color: '#3a5a2a', roughness: 0.6 }),
+  );
+  cabin.position.set(0, 1.15, -0.3);
+  cabin.castShadow = true;
+  mesh.add(cabin);
+  // Wheels
+  const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.2, 12);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.9 });
+  for (const [wx, wz] of [[-1.2, 1.2], [1.2, 1.2], [-1.2, -1.2], [1.2, -1.2]]) {
+    const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(wx, 0.05, wz);
+    mesh.add(wheel);
+  }
+}
+
+function buildTankMesh(mesh: THREE.Group) {
+  const hullMat = new THREE.MeshStandardMaterial({ color: '#46502f', roughness: 0.85, metalness: 0.2 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#2a2a26', roughness: 0.95 });
+  const barrelMat = new THREE.MeshStandardMaterial({ color: '#3a4028', roughness: 0.7, metalness: 0.3 });
+
+  // Lower hull
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.9, 4.8), hullMat);
+  hull.position.y = 0.7;
+  hull.castShadow = true;
+  mesh.add(hull);
+
+  // Upper sloped deck
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.5, 3.6), hullMat);
+  deck.position.y = 1.3;
+  deck.castShadow = true;
+  mesh.add(deck);
+
+  // Tracks (left/right)
+  const trackGeo = new THREE.BoxGeometry(0.7, 0.7, 5.0);
+  for (const tx of [-1.45, 1.45]) {
+    const track = new THREE.Mesh(trackGeo, darkMat);
+    track.position.set(tx, 0.45, 0);
+    track.castShadow = true;
+    mesh.add(track);
+  }
+  // Road wheels for a bit of detail
+  const rwGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.2, 10);
+  for (const tx of [-1.45, 1.45]) {
+    for (const tz of [-1.6, -0.55, 0.55, 1.6]) {
+      const rw = new THREE.Mesh(rwGeo, darkMat);
+      rw.rotation.z = Math.PI / 2;
+      rw.position.set(tx, 0.4, tz);
+      mesh.add(rw);
+    }
+  }
+
+  // Turret
+  const turret = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.15, 0.7, 12), hullMat);
+  turret.position.set(0, 1.85, -0.2);
+  turret.castShadow = true;
+  mesh.add(turret);
+
+  // Cannon barrel (points forward, -z)
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 3.4, 12), barrelMat);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 1.9, -2.0);
+  barrel.castShadow = true;
+  mesh.add(barrel);
+
+  // Commander hatch
+  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.25, 10), darkMat);
+  hatch.position.set(0, 2.25, -0.1);
+  mesh.add(hatch);
+}
+
 function VehiclesScene() {
   const ref = useRef<THREE.Group>(null);
   useFrame(() => {
@@ -1699,30 +1782,10 @@ function VehiclesScene() {
       if (!mesh) {
         mesh = new THREE.Group();
         mesh.userData.id = v.id;
-        // Body
-        const body = new THREE.Mesh(
-          new THREE.BoxGeometry(2.2, 0.8, 3.6),
-          new THREE.MeshStandardMaterial({ color: '#4a6a3a', roughness: 0.7 }),
-        );
-        body.position.y = 0.4;
-        body.castShadow = true;
-        mesh.add(body);
-        // Cabin
-        const cabin = new THREE.Mesh(
-          new THREE.BoxGeometry(1.8, 0.7, 1.6),
-          new THREE.MeshStandardMaterial({ color: '#3a5a2a', roughness: 0.6 }),
-        );
-        cabin.position.set(0, 1.15, -0.3);
-        cabin.castShadow = true;
-        mesh.add(cabin);
-        // Wheels
-        const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.2, 12);
-        const wheelMat = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.9 });
-        for (const [wx, wz] of [[-1.2, 1.2], [1.2, 1.2], [-1.2, -1.2], [1.2, -1.2]]) {
-          const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-          wheel.rotation.z = Math.PI / 2;
-          wheel.position.set(wx, 0.05, wz);
-          mesh.add(wheel);
+        if (v.kind === 'tank') {
+          buildTankMesh(mesh);
+        } else {
+          buildJeepMesh(mesh);
         }
         g.add(mesh);
       }

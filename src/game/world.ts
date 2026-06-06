@@ -49,7 +49,7 @@ function mulberry32(seed: number) {
   };
 }
 
-export const WORLD_SIZE = 720; // doubled large battlefield
+export const WORLD_SIZE = 1080; // 1.5x expanded large battlefield (was 720)
 
 // Radius of the flat city core. Inside this the ground is leveled so the
 // streets, buildings and plaza sit on flat terrain; outside it the desert
@@ -110,6 +110,18 @@ export function baseTerrainHeight(x: number, z: number): number {
   cityBlend = Math.max(0, Math.min(1, cityBlend));
   cityBlend = cityBlend * cityBlend * (3 - 2 * cityBlend); // smoothstep
   h *= cityBlend;
+
+  // Flatten the home-base compound near the south edge so its walls and the
+  // tank sit on level ground. BASE_POS is at (0, WORLD_SIZE/2 - 70).
+  const baseX = 0;
+  const baseZ = WORLD_SIZE / 2 - 70;
+  const distFromBase = Math.hypot(x - baseX, z - baseZ);
+  const baseFlatStart = 34; // ~ BASE_HALF + a margin
+  const baseFlatEnd = baseFlatStart + 40;
+  let baseBlend = (distFromBase - baseFlatStart) / (baseFlatEnd - baseFlatStart);
+  baseBlend = Math.max(0, Math.min(1, baseBlend));
+  baseBlend = baseBlend * baseBlend * (3 - 2 * baseBlend);
+  h *= baseBlend;
 
   return h;
 }
@@ -377,6 +389,7 @@ export interface World {
   rugs: Rug[];
   hills: TerrainHill[];
   fountainPos: THREE.Vector3;
+  basePos: THREE.Vector3;
 }
 
 export function generateWorld(): World {
@@ -698,9 +711,16 @@ export function generateWorld(): World {
     },
   ];
 
+  // --- Home base near the expanded map's south edge ---------------------
+  // A walled compound (open on the side facing the battlefield) that holds the
+  // player's far spawn point and a tank. Sits just inside the south perimeter
+  // wall of the now 1.5x-larger map.
+  const baseWalls = buildBaseCompound();
+
   const walls: Wall[] = [];
   for (const b of buildings) walls.push(...b.walls);
   walls.push(...perimeter);
+  walls.push(...baseWalls);
 
   // Ground height (base dunes + authored mounds) used to seat props on the
   // rolling terrain. Mirrors terrainHeightAt() but without needing the World.
@@ -743,7 +763,67 @@ export function generateWorld(): World {
     rugs,
     hills,
     fountainPos: new THREE.Vector3(0, 0, 0),
+    basePos: BASE_POS.clone(),
   };
+}
+
+// === HOME BASE ============================================================
+// Center of the walled home base, placed near the south edge of the expanded
+// map (just inside the perimeter wall). The compound opening faces north
+// (toward the battlefield / -z) so vehicles can drive out.
+export const BASE_POS = new THREE.Vector3(0, 0, WORLD_SIZE / 2 - 70);
+export const BASE_HALF = 26; // half-extent of the square compound
+
+// Build the perimeter walls of the home base compound. The wall on the north
+// side (facing the battlefield) has a gap so a tank can drive out.
+function buildBaseCompound(): Wall[] {
+  const walls: Wall[] = [];
+  const wallH = 5;
+  const wallT = 1.2;
+  const color = "#6b6256";
+  const cx = BASE_POS.x;
+  const cz = BASE_POS.z;
+  const half = BASE_HALF;
+  const gap = 12; // opening width on the north wall
+
+  // South wall (full, facing the map edge)
+  walls.push({
+    pos: new THREE.Vector3(cx, wallH / 2, cz + half),
+    size: new THREE.Vector3(half * 2, wallH, wallT),
+    color,
+    kind: "wall",
+  });
+  // East wall
+  walls.push({
+    pos: new THREE.Vector3(cx + half, wallH / 2, cz),
+    size: new THREE.Vector3(wallT, wallH, half * 2),
+    color,
+    kind: "wall",
+  });
+  // West wall
+  walls.push({
+    pos: new THREE.Vector3(cx - half, wallH / 2, cz),
+    size: new THREE.Vector3(wallT, wallH, half * 2),
+    color,
+    kind: "wall",
+  });
+  // North wall split into two segments leaving a central gate.
+  const sideLen = half - gap / 2;
+  if (sideLen > 0.1) {
+    walls.push({
+      pos: new THREE.Vector3(cx - (gap / 2 + sideLen / 2), wallH / 2, cz - half),
+      size: new THREE.Vector3(sideLen, wallH, wallT),
+      color,
+      kind: "wall",
+    });
+    walls.push({
+      pos: new THREE.Vector3(cx + (gap / 2 + sideLen / 2), wallH / 2, cz - half),
+      size: new THREE.Vector3(sideLen, wallH, wallT),
+      color,
+      kind: "wall",
+    });
+  }
+  return walls;
 }
 
 function insideAnyBuilding(p: THREE.Vector3, buildings: Building[], pad: number) {
