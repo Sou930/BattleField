@@ -236,25 +236,33 @@ function Scene({ engine }: { engine: GameEngine }) {
 }
 
 function Sky() {
+  const ref = useRef<THREE.Mesh>(null);
+  const { camera } = useThree();
   const mat = useMemo(() => {
     return new THREE.ShaderMaterial({
+      // Render the inside of the dome. Disable depth entirely so the sky is
+      // always drawn first (renderOrder -1000) as a pure background — it can
+      // never be clipped by the camera far-plane or poke through terrain, which
+      // is what produced the "blue circle / cut-off dome" artifact.
       side: THREE.BackSide,
       depthWrite: false,
+      depthTest: false,
+      fog: false,
       uniforms: {
-        topColor: { value: new THREE.Color("#5a9ed6") },
-        midColor: { value: new THREE.Color("#c8daf0") },
-        horizonColor: { value: new THREE.Color("#e8c090") },
+        topColor: { value: new THREE.Color("#4f93d4") },
+        midColor: { value: new THREE.Color("#bcd6ef") },
+        horizonColor: { value: new THREE.Color("#ead0a0") },
         sunDir: { value: new THREE.Vector3(0.4, 0.7, 0.2).normalize() },
         sunColor: { value: new THREE.Color("#ffe8a0") },
       },
       vertexShader: `
-        varying vec3 vWorldPos;
-        varying vec3 vWorldDir;
+        varying vec3 vDir;
         void main() {
-          vec4 wp = modelMatrix * vec4(position, 1.0);
-          vWorldPos = wp.xyz;
-          vWorldDir = normalize(wp.xyz);
-          gl_Position = projectionMatrix * viewMatrix * wp;
+          // Use the local position (sphere is centered on the camera) as the
+          // view direction so the gradient/sun stay locked to the world even as
+          // the dome follows the camera.
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
       fragmentShader: `
@@ -263,8 +271,7 @@ function Sky() {
         uniform vec3 horizonColor;
         uniform vec3 sunDir;
         uniform vec3 sunColor;
-        varying vec3 vWorldPos;
-        varying vec3 vWorldDir;
+        varying vec3 vDir;
 
         float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float noise(vec2 p) {
@@ -275,24 +282,26 @@ function Sky() {
           return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
         }
         void main() {
-          vec3 dir = normalize(vWorldDir);
+          vec3 dir = normalize(vDir);
           float h = dir.y;
-          // Sky gradient with 3 stops
-          float t1 = smoothstep(-0.05, 0.15, h);
-          float t2 = smoothstep(0.15, 0.7, h);
+          // Smooth 3-stop sky gradient. The horizon band fades in just below the
+          // horizon so it blends with the distance fog instead of forming a hard
+          // ring.
+          float t1 = smoothstep(-0.08, 0.18, h);
+          float t2 = smoothstep(0.18, 0.7, h);
           vec3 sky = mix(horizonColor, midColor, t1);
           sky = mix(sky, topColor, t2);
           // Sun disc and glow
           float sunDot = max(0.0, dot(dir, sunDir));
-          float sunDisc = smoothstep(0.997, 0.999, sunDot);
+          float sunDisc = smoothstep(0.9975, 0.9990, sunDot);
           float sunGlow = pow(sunDot, 12.0) * 0.4;
           float sunHaze = pow(sunDot, 3.0) * 0.15;
           sky += sunColor * (sunDisc * 2.0 + sunGlow + sunHaze);
-          // Wispy clouds
+          // Wispy clouds (only on the upper hemisphere)
           if (h > 0.0) {
-            vec2 cp = dir.xz / (h + 0.1) * 8.0;
+            vec2 cp = dir.xz / (h + 0.12) * 8.0;
             float cn = noise(cp * 0.3) * 0.5 + noise(cp * 0.7) * 0.3 + noise(cp * 1.5) * 0.2;
-            float cloud = smoothstep(0.45, 0.7, cn) * smoothstep(0.0, 0.2, h) * 0.6;
+            float cloud = smoothstep(0.45, 0.7, cn) * smoothstep(0.02, 0.22, h) * 0.55;
             sky = mix(sky, vec3(1.0, 0.98, 0.95), cloud);
           }
           gl_FragColor = vec4(sky, 1.0);
@@ -300,9 +309,20 @@ function Sky() {
       `,
     });
   }, []);
+
+  // Keep the dome centered on the camera every frame. Because it always moves
+  // with the player it can never run "off the edge" of the map (which is what
+  // made the old fixed-origin dome show up as a floating blue arch when the
+  // player walked toward the perimeter). A modest radius keeps it well inside
+  // the camera far-plane; depthTest is off so size only affects nothing visible.
+  useFrame(() => {
+    if (ref.current) ref.current.position.copy(camera.position);
+  });
+
   return (
-    <mesh material={mat} renderOrder={-1000}>
-      <sphereGeometry args={[500, 24, 12]} />
+    <mesh ref={ref} material={mat} renderOrder={-1000} frustumCulled={false}>
+      {/* High-poly dome for a smooth, distortion-free gradient. */}
+      <sphereGeometry args={[480, 64, 40]} />
     </mesh>
   );
 }
@@ -2260,7 +2280,7 @@ export default function Game() {
         {showCanvas && (
           <Canvas
             shadows
-            camera={{ fov: 78, near: 0.15, far: 600, position: [0, 1.7, 0] }}
+            camera={{ fov: 78, near: 0.15, far: 1000, position: [0, 1.7, 0] }}
             gl={{
               antialias: false,
               powerPreference: "high-performance",
@@ -2271,7 +2291,9 @@ export default function Game() {
             // keeping the lower bound for weak GPUs — quality up, cost bounded.
             dpr={[0.9, Math.min(typeof window !== "undefined" ? window.devicePixelRatio : 1, 1.5)]}
             onCreated={({ scene, gl }) => {
-              scene.background = new THREE.Color("#87ceeb");
+              // Match the atmospheric haze color so the very far horizon blends
+              // seamlessly with the fog instead of revealing a flat blue band.
+              scene.background = new THREE.Color("#e3c59a");
               gl.toneMapping = THREE.ACESFilmicToneMapping;
               gl.toneMappingExposure = 1.35;
               gl.outputColorSpace = THREE.SRGBColorSpace;
