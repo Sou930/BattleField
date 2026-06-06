@@ -45,6 +45,7 @@ export class GameEngine {
     enterVehiclePressed?: boolean;
     vehicleGas?: boolean;
     vehicleBrake?: boolean;
+    mapTogglePressed?: boolean;
   };
   shootHeld = false;
   spawnPoints: { name: string; pos: THREE.Vector3 }[] = [];
@@ -361,6 +362,13 @@ export class GameEngine {
       this.tryEnterExitVehicle();
       this.input.enterVehiclePressed = false;
       this.input.keys.delete("KeyF"); // consume
+    }
+    // Toggle the full-screen tactical map with M
+    if (this.input.mapTogglePressed) {
+      this.state.mapOpen = !this.state.mapOpen;
+      this.input.mapTogglePressed = false;
+      this.input.keys.delete("KeyM");
+      store.emit();
     }
     if (this.input.keys.has("Space") || this.input.jumpPressed) {
       if (p.onGround && !this.state.playerInVehicle) {

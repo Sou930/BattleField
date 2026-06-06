@@ -3,7 +3,7 @@ import { useGame, store } from "@/game/store";
 import { WEAPONS } from "@/game/weapons";
 import { Input } from "@/game/input";
 import { cn } from "@/lib/utils";
-import { WORLD_SIZE } from "@/game/world";
+import { WORLD_SIZE, buildMapData, generateWorld, type MapData } from "@/game/world";
 import { CLASSES } from "@/game/classes";
 import type { WeaponId, Loadout, SoldierClass } from "@/game/types";
 
@@ -11,6 +11,14 @@ interface Props {
   onStart: () => void;
   onStartGame: (loadout?: Loadout) => void;
   input?: MutableRefObject<Input | null>;
+}
+
+// The world is deterministic (seeded), so the static map geometry only needs
+// to be computed once for the whole HUD lifetime.
+let _mapData: MapData | null = null;
+function getMapData(): MapData {
+  if (!_mapData) _mapData = buildMapData(generateWorld());
+  return _mapData;
 }
 
 function detectMobile() {
@@ -52,6 +60,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
   const vehicles = useGame((s) => s.vehicles);
   const playerInVehicle = useGame((s) => s.playerInVehicle);
   const playerClass = useGame((s) => s.loadout.soldierClass);
+  const mapOpen = useGame((s) => s.mapOpen);
 
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
@@ -322,7 +331,45 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
           smokeClouds={smokeClouds}
           capturePoints={capturePoints}
           vehicles={vehicles}
+          pickups={pickups}
+          mapData={getMapData()}
         />
+      )}
+
+      {/* Full-screen tactical map (M) */}
+      {status === "playing" && mapOpen && (
+        <FullMap
+          playerPos={playerPos}
+          playerYaw={playerYaw}
+          soldiers={soldiers}
+          capturePoints={capturePoints}
+          vehicles={vehicles}
+          pickups={pickups}
+          smokeClouds={smokeClouds}
+          mapData={getMapData()}
+          isMobile={isMobile}
+          onClose={() => {
+            store.state.mapOpen = false;
+            store.emit();
+          }}
+        />
+      )}
+
+      {/* Map hint (desktop) */}
+      {status === "playing" && !mapOpen && !isMobile && (
+        <div className="absolute right-4 text-[9px] uppercase tracking-widest text-muted-foreground" style={{ top: 158 + 24 }}>
+          [M] FULL MAP
+        </div>
+      )}
+
+      {/* Map button (mobile) */}
+      {status === "playing" && !mapOpen && isMobile && (
+        <button
+          className="pointer-events-auto absolute left-3 top-24 h-9 w-9 rounded border border-[hsl(var(--hud)/0.5)] bg-background/70 text-xs font-bold text-[hsl(var(--hud))] backdrop-blur-sm active:bg-[hsl(var(--hud))] active:text-[hsl(var(--hud-foreground))]"
+          onClick={() => { store.state.mapOpen = true; store.emit(); }}
+        >
+          MAP
+        </button>
       )}
 
       {/* Menu / End screens */}
@@ -709,6 +756,7 @@ function Menu({ onStart, isMobile }: { onStart: () => void; isMobile: boolean })
               <Row label="ジャンプ / リロード" keys="JUMP / RELOAD" />
               <Row label="拾う / 乗車" keys="PICK UP / ENTER" />
               <Row label="武器切替" keys="右側 1〜5" />
+              <Row label="マップ全体" keys="MAPボタン" />
             </>
           ) : (
             <>
@@ -718,6 +766,7 @@ function Menu({ onStart, isMobile }: { onStart: () => void; isMobile: boolean })
               <Row label="Fire / Aim" keys="L-Mouse / R-Mouse" />
               <Row label="Reload / Pick up" keys="R / E" />
               <Row label="Vehicle" keys="F (enter/exit)" />
+              <Row label="Full Map" keys="M (zoomable)" />
               <Row label="Weapons" keys="1 Rifle · 2 Pistol · 3 Nade · 4 SMG · 5 Sniper" />
             </>
           )}
@@ -982,6 +1031,211 @@ function LoadoutScreen({ onStart, isMobile }: { onStart: (loadout: Loadout) => v
   );
 }
 
+// === SHARED MAP RENDER HELPERS ===
+type Vec2 = { x: number; z: number };
+type MapSoldier = { pos: Vec2; team: string; alive: boolean };
+type MapVehicle = { pos: Vec2; destroyed: boolean; kind: string; team?: string | null };
+type MapCapture = { pos: Vec2; owner: string | null; name: string; radius?: number };
+type MapSmoke = { pos: Vec2; radius: number };
+type MapPickup = { pos: Vec2; kind: string; taken: boolean };
+
+const PICKUP_COLOR: Record<string, string> = {
+  weapon: "#c084fc",
+  ammo: "#ffd24a",
+  health: "#5ee06a",
+  grenade: "#ff9a3c",
+};
+
+// Renders the static world (ground, roads, building footprints, hills, trees,
+// landmarks) plus dynamic actors into an <svg>, given a world→screen transform.
+function MapGeometry({
+  mapData,
+  toX,
+  toY,
+  scale,
+  detail,
+}: {
+  mapData: MapData;
+  toX: (wx: number) => number;
+  toY: (wz: number) => number;
+  scale: number; // pixels per world unit
+  detail: "low" | "high";
+}) {
+  return (
+    <>
+      {/* Hills / elevation blobs */}
+      {mapData.hills.map((h, i) => (
+        <circle key={`hill-${i}`} cx={toX(h.x)} cy={toY(h.z)} r={h.r * scale} fill="rgba(150,120,70,0.18)" />
+      ))}
+
+      {/* Roads */}
+      {mapData.roads.map((r, i) => (
+        <rect
+          key={`road-${i}`}
+          x={toX(r.cx) - r.hw * scale}
+          y={toY(r.cz) - r.hd * scale}
+          width={r.hw * 2 * scale}
+          height={r.hd * 2 * scale}
+          fill="rgba(60,52,38,0.85)"
+        />
+      ))}
+
+      {/* Trees (only in high detail to avoid clutter) */}
+      {detail === "high" &&
+        mapData.trees.map((t, i) => (
+          <circle key={`tree-${i}`} cx={toX(t.x)} cy={toY(t.z)} r={Math.max(1, t.r * scale)} fill="rgba(70,110,55,0.65)" />
+        ))}
+
+      {/* Containers */}
+      {mapData.containers.map((c, i) => (
+        <rect
+          key={`cont-${i}`}
+          x={toX(c.cx) - c.hw * scale}
+          y={toY(c.cz) - c.hd * scale}
+          width={Math.max(1, c.hw * 2 * scale)}
+          height={Math.max(1, c.hd * 2 * scale)}
+          fill="rgba(120,130,140,0.7)"
+        />
+      ))}
+
+      {/* Building footprints */}
+      {mapData.buildings.map((b, i) => (
+        <rect
+          key={`b-${i}`}
+          x={toX(b.cx) - b.hw * scale}
+          y={toY(b.cz) - b.hd * scale}
+          width={Math.max(1, b.hw * 2 * scale)}
+          height={Math.max(1, b.hd * 2 * scale)}
+          fill={b.tall ? "rgba(180,168,140,0.92)" : "rgba(150,138,110,0.78)"}
+          stroke="rgba(40,34,24,0.6)"
+          strokeWidth={detail === "high" ? 0.6 : 0}
+        />
+      ))}
+    </>
+  );
+}
+
+function MapActors({
+  toX,
+  toY,
+  scale,
+  soldiers,
+  vehicles,
+  capturePoints,
+  smokeClouds,
+  pickups,
+  playerPos,
+  playerYaw,
+  soldierR,
+  showPickups,
+}: {
+  toX: (wx: number) => number;
+  toY: (wz: number) => number;
+  scale: number;
+  soldiers: MapSoldier[];
+  vehicles: MapVehicle[];
+  capturePoints: MapCapture[];
+  smokeClouds: MapSmoke[];
+  pickups: MapPickup[];
+  playerPos: Vec2;
+  playerYaw: number;
+  soldierR: number;
+  showPickups: boolean;
+}) {
+  return (
+    <>
+      {/* Capture point radius rings */}
+      {capturePoints.map((cp, i) => (
+        <g key={`cpr-${i}`}>
+          {cp.radius ? (
+            <circle
+              cx={toX(cp.pos.x)}
+              cy={toY(cp.pos.z)}
+              r={cp.radius * scale}
+              fill={cp.owner === "blue" ? "rgba(68,136,255,0.10)" : cp.owner === "red" ? "rgba(255,68,68,0.10)" : "rgba(150,150,150,0.08)"}
+              stroke={cp.owner === "blue" ? "rgba(68,136,255,0.5)" : cp.owner === "red" ? "rgba(255,68,68,0.5)" : "rgba(150,150,150,0.4)"}
+              strokeWidth={1}
+              strokeDasharray="4 3"
+            />
+          ) : null}
+        </g>
+      ))}
+
+      {/* Smoke clouds */}
+      {smokeClouds.map((sc, i) => (
+        <circle key={`smk-${i}`} cx={toX(sc.pos.x)} cy={toY(sc.pos.z)} r={Math.max(2, sc.radius * scale)} fill="rgba(210,210,210,0.4)" />
+      ))}
+
+      {/* Pickups */}
+      {showPickups &&
+        pickups.filter((p) => !p.taken).map((p, i) => (
+          <rect
+            key={`pk-${i}`}
+            x={toX(p.pos.x) - 2.5}
+            y={toY(p.pos.z) - 2.5}
+            width={5}
+            height={5}
+            rx={1}
+            fill={PICKUP_COLOR[p.kind] || "#fff"}
+            opacity={0.85}
+          />
+        ))}
+
+      {/* Capture point markers */}
+      {capturePoints.map((cp, i) => {
+        const sx = toX(cp.pos.x);
+        const sy = toY(cp.pos.z);
+        return (
+          <g key={`cp-${i}`}>
+            <rect
+              x={sx - 6} y={sy - 6} width={12} height={12}
+              fill={cp.owner === "blue" ? "rgba(68,136,255,0.45)" : cp.owner === "red" ? "rgba(255,68,68,0.45)" : "rgba(120,120,120,0.35)"}
+              stroke={cp.owner === "blue" ? "#4488ff" : cp.owner === "red" ? "#ff4444" : "#aaa"}
+              strokeWidth={1.5}
+            />
+            <text x={sx} y={sy + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight="bold">{cp.name}</text>
+          </g>
+        );
+      })}
+
+      {/* Vehicles */}
+      {vehicles.filter((v) => !v.destroyed).map((v, i) => (
+        <rect
+          key={`v-${i}`}
+          x={toX(v.pos.x) - 4}
+          y={toY(v.pos.z) - 4}
+          width={8}
+          height={8}
+          rx={1.5}
+          fill="#ffaa20"
+          stroke="#7a5200"
+          strokeWidth={1}
+          opacity={0.95}
+        />
+      ))}
+
+      {/* Soldiers */}
+      {soldiers.filter((s) => s.alive).map((s, i) => (
+        <circle
+          key={`s-${i}`}
+          cx={toX(s.pos.x)}
+          cy={toY(s.pos.z)}
+          r={soldierR}
+          fill={s.team === "blue" ? "#4488ff" : "#ff4444"}
+          stroke="rgba(0,0,0,0.5)"
+          strokeWidth={0.6}
+          opacity={0.95}
+        />
+      ))}
+
+      {/* Player arrow */}
+      <g transform={`translate(${toX(playerPos.x)}, ${toY(playerPos.z)}) rotate(${(-playerYaw * 180) / Math.PI})`}>
+        <polygon points="0,-8 5,5 -5,5" fill="#44ff44" stroke="#0a3" strokeWidth={1} />
+      </g>
+    </>
+  );
+}
+
 // === MINIMAP ===
 function Minimap({
   playerPos,
@@ -990,91 +1244,327 @@ function Minimap({
   smokeClouds,
   capturePoints,
   vehicles,
+  pickups,
+  mapData,
 }: {
-  playerPos: { x: number; z: number };
+  playerPos: Vec2;
   playerYaw: number;
-  soldiers: Array<{ pos: { x: number; z: number }; team: string; alive: boolean }>;
-  smokeClouds: Array<{ pos: { x: number; z: number }; radius: number }>;
-  capturePoints: Array<{ pos: { x: number; z: number }; owner: string | null; name: string }>;
-  vehicles: Array<{ pos: { x: number; z: number }; destroyed: boolean; kind: string }>;
+  soldiers: MapSoldier[];
+  smokeClouds: MapSmoke[];
+  capturePoints: MapCapture[];
+  vehicles: MapVehicle[];
+  pickups: MapPickup[];
+  mapData: MapData;
 }) {
-  const size = 150;
-  const range = 80;
+  const size = 158;
+  const range = 110; // world units shown across the minimap
+  const scale = size / range;
 
-  const toMapX = (wx: number) => ((wx - playerPos.x) / range + 0.5) * size;
-  const toMapY = (wz: number) => ((wz - playerPos.z) / range + 0.5) * size;
+  // Player-centred, north-up projection.
+  const toX = (wx: number) => (wx - playerPos.x) * scale + size / 2;
+  const toY = (wz: number) => (wz - playerPos.z) * scale + size / 2;
+
+  const clipId = "minimap-clip";
 
   return (
     <div
-      className="pointer-events-none absolute top-20 right-4 overflow-hidden rounded-lg border border-[hsl(var(--hud)/0.4)] bg-background/70 backdrop-blur-sm"
+      className="pointer-events-none absolute top-20 right-4 overflow-hidden rounded-lg border border-[hsl(var(--hud)/0.45)] bg-[#1c1810]/80 backdrop-blur-sm shadow-lg"
       style={{ width: size, height: size }}
     >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        {/* Capture points */}
-        {capturePoints.map((cp, i) => {
-          const sx = toMapX(cp.pos.x);
-          const sy = toMapY(cp.pos.z);
-          if (sx < -10 || sx > size + 10 || sy < -10 || sy > size + 10) return null;
-          return (
-            <g key={`cp-${i}`}>
-              <rect
-                x={sx - 5} y={sy - 5} width={10} height={10}
-                fill={cp.owner === "blue" ? "rgba(68,136,255,0.4)" : cp.owner === "red" ? "rgba(255,68,68,0.4)" : "rgba(120,120,120,0.3)"}
-                stroke={cp.owner === "blue" ? "#4488ff" : cp.owner === "red" ? "#ff4444" : "#888"}
-                strokeWidth={1}
-              />
-              <text x={sx} y={sy - 7} textAnchor="middle" fill="#aaa" fontSize={5}>{cp.name}</text>
-            </g>
-          );
-        })}
-
-        {/* Vehicles */}
-        {vehicles.filter(v => !v.destroyed).map((v, i) => {
-          const sx = toMapX(v.pos.x);
-          const sy = toMapY(v.pos.z);
-          if (sx < -5 || sx > size + 5 || sy < -5 || sy > size + 5) return null;
-          return (
-            <rect key={`v-${i}`} x={sx - 3} y={sy - 3} width={6} height={6} fill="#ffaa20" opacity={0.8} rx={1} />
-          );
-        })}
-
-        {/* Smoke clouds */}
-        {smokeClouds.map((sc, i) => {
-          const sx = toMapX(sc.pos.x);
-          const sy = toMapY(sc.pos.z);
-          const sr = (sc.radius / range) * size;
-          return (
-            <circle key={`smoke-${i}`} cx={sx} cy={sy} r={sr} fill="rgba(200,200,200,0.4)" />
-          );
-        })}
-
-        {/* Soldiers */}
-        {soldiers.filter(s => s.alive).map((s, i) => {
-          const sx = toMapX(s.pos.x);
-          const sy = toMapY(s.pos.z);
-          if (sx < -5 || sx > size + 5 || sy < -5 || sy > size + 5) return null;
-          return (
-            <circle
-              key={`s-${i}`}
-              cx={sx}
-              cy={sy}
-              r={3}
-              fill={s.team === "blue" ? "#4488ff" : "#ff4444"}
-              opacity={0.9}
-            />
-          );
-        })}
-
-        {/* Player */}
-        <g transform={`translate(${size / 2}, ${size / 2}) rotate(${(-playerYaw * 180) / Math.PI})`}>
-          <polygon points="0,-6 4,4 -4,4" fill="#44ff44" />
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={0} y={0} width={size} height={size} />
+          </clipPath>
+        </defs>
+        <g clipPath={`url(#${clipId})`}>
+          {/* Sand backdrop */}
+          <rect x={0} y={0} width={size} height={size} fill="#3a3320" />
+          <MapGeometry mapData={mapData} toX={toX} toY={toY} scale={scale} detail="low" />
+          <MapActors
+            toX={toX}
+            toY={toY}
+            scale={scale}
+            soldiers={soldiers}
+            vehicles={vehicles}
+            capturePoints={capturePoints}
+            smokeClouds={smokeClouds}
+            pickups={pickups}
+            playerPos={playerPos}
+            playerYaw={playerYaw}
+            soldierR={2.6}
+            showPickups={false}
+          />
         </g>
-
-        <rect x={0} y={0} width={size} height={size} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
+        <rect x={0} y={0} width={size} height={size} fill="none" stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
       </svg>
       <div className="absolute bottom-1 left-1 text-[8px] uppercase tracking-widest text-muted-foreground">
-        MAP
+        MAP · [M]
       </div>
+    </div>
+  );
+}
+
+// === FULL-SCREEN TACTICAL MAP ===
+function FullMap({
+  playerPos,
+  playerYaw,
+  soldiers,
+  capturePoints,
+  vehicles,
+  pickups,
+  smokeClouds,
+  mapData,
+  isMobile,
+  onClose,
+}: {
+  playerPos: Vec2;
+  playerYaw: number;
+  soldiers: MapSoldier[];
+  capturePoints: MapCapture[];
+  vehicles: MapVehicle[];
+  pickups: MapPickup[];
+  smokeClouds: MapSmoke[];
+  mapData: MapData;
+  isMobile: boolean;
+  onClose: () => void;
+}) {
+  const world = mapData.worldSize;
+  const half = world / 2;
+  const viewport = 640; // logical svg size
+
+  // zoom: 1 = whole world fits; higher = zoomed in. center is in world coords.
+  const [zoom, setZoom] = useState(1);
+  const [center, setCenter] = useState<Vec2>({ x: playerPos.x, z: playerPos.z });
+  const dragRef = useRef<{ x: number; y: number; cx: number; cz: number; id: number | null } | null>(null);
+
+  const minZoom = 0.6;
+  const maxZoom = 6;
+
+  // world units visible across the viewport at current zoom
+  const span = world / zoom;
+  const scale = viewport / span; // px per world unit
+
+  const toX = (wx: number) => (wx - center.x) * scale + viewport / 2;
+  const toY = (wz: number) => (wz - center.z) * scale + viewport / 2;
+
+  const clampCenter = useCallback(
+    (c: Vec2, z: number): Vec2 => {
+      const visHalf = world / z / 2;
+      const lim = Math.max(0, half - visHalf);
+      return {
+        x: Math.max(-lim, Math.min(lim, c.x)),
+        z: Math.max(-lim, Math.min(lim, c.z)),
+      };
+    },
+    [world, half],
+  );
+
+  const applyZoom = useCallback(
+    (factor: number) => {
+      setZoom((z) => {
+        const nz = Math.max(minZoom, Math.min(maxZoom, z * factor));
+        setCenter((c) => clampCenter(c, nz));
+        return nz;
+      });
+    },
+    [clampCenter],
+  );
+
+  // ESC / M to close
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === "Escape" || e.code === "KeyM") {
+        e.preventDefault();
+        onClose();
+      } else if (e.code === "Equal" || e.code === "NumpadAdd") {
+        applyZoom(1.25);
+      } else if (e.code === "Minus" || e.code === "NumpadSubtract") {
+        applyZoom(0.8);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, applyZoom]);
+
+  const svgRef = useRef<SVGSVGElement>(null);
+  // Active touch points for pinch-to-zoom
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ dist: number; zoom: number } | null>(null);
+
+  const screenToWorldDelta = (dxPx: number, dyPx: number) => {
+    const el = svgRef.current;
+    if (!el) return { x: 0, z: 0 };
+    const rect = el.getBoundingClientRect();
+    const pxScale = rect.width / viewport; // css px per logical unit
+    return { x: dxPx / (scale * pxScale), z: dyPx / (scale * pxScale) };
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 1) {
+      dragRef.current = { x: e.clientX, y: e.clientY, cx: center.x, cz: center.z, id: e.pointerId };
+    } else if (pointersRef.current.size === 2) {
+      // start pinch
+      const pts = [...pointersRef.current.values()];
+      pinchRef.current = { dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y), zoom };
+      dragRef.current = null;
+    }
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (pointersRef.current.has(e.pointerId)) {
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    // Pinch zoom takes priority when two fingers are down
+    if (pointersRef.current.size >= 2 && pinchRef.current) {
+      const pts = [...pointersRef.current.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const ratio = dist / (pinchRef.current.dist || 1);
+      const nz = Math.max(minZoom, Math.min(maxZoom, pinchRef.current.zoom * ratio));
+      setZoom(nz);
+      setCenter((c) => clampCenter(c, nz));
+      return;
+    }
+    const d = dragRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    const wd = screenToWorldDelta(e.clientX - d.x, e.clientY - d.y);
+    setCenter(clampCenter({ x: d.cx - wd.x, z: d.cz - wd.z }, zoom));
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
+    if (dragRef.current?.id === e.pointerId) dragRef.current = null;
+  };
+  const onWheel = (e: React.WheelEvent) => {
+    applyZoom(e.deltaY < 0 ? 1.15 : 0.87);
+  };
+
+  return (
+    <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-background/85 backdrop-blur-md">
+      <div className="relative flex max-h-[94vh] w-full max-w-[760px] flex-col px-4">
+        {/* Header */}
+        <div className="mb-2 flex items-center justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.3em] text-[hsl(var(--hud))]">Tactical Map</div>
+            <div className="text-[9px] text-muted-foreground">
+              {isMobile ? "ドラッグで移動 · ピンチ/ボタンでズーム" : "Drag to pan · Wheel / +- to zoom · [M] or [Esc] to close"}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded border border-[hsl(var(--hud)/0.5)] bg-background/70 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-[hsl(var(--hud))] hover:bg-[hsl(var(--hud))] hover:text-[hsl(var(--hud-foreground))]"
+          >
+            ✕ Close
+          </button>
+        </div>
+
+        {/* Map surface */}
+        <div className="relative aspect-square w-full overflow-hidden rounded-lg border border-[hsl(var(--hud)/0.4)] bg-[#1c1810] shadow-2xl">
+          <svg
+            ref={svgRef}
+            width="100%"
+            height="100%"
+            viewBox={`0 0 ${viewport} ${viewport}`}
+            className="touch-none"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            onWheel={onWheel}
+            style={{ cursor: "grab" }}
+          >
+            {/* World extents backdrop */}
+            <rect
+              x={toX(-half)}
+              y={toY(-half)}
+              width={world * scale}
+              height={world * scale}
+              fill="#3a3320"
+              stroke="rgba(255,255,255,0.12)"
+              strokeWidth={2}
+            />
+
+            <MapGeometry mapData={mapData} toX={toX} toY={toY} scale={scale} detail="high" />
+
+            {/* Landmark labels */}
+            {mapData.landmarks.map((lm, i) => (
+              <g key={`lm-${i}`}>
+                <circle cx={toX(lm.x)} cy={toY(lm.z)} r={3} fill="rgba(255,255,255,0.5)" />
+                <text
+                  x={toX(lm.x)}
+                  y={toY(lm.z) - 7}
+                  textAnchor="middle"
+                  fill="rgba(255,255,255,0.7)"
+                  fontSize={11}
+                  fontWeight="bold"
+                  style={{ letterSpacing: "1px" }}
+                >
+                  {lm.name}
+                </text>
+              </g>
+            ))}
+
+            <MapActors
+              toX={toX}
+              toY={toY}
+              scale={scale}
+              soldiers={soldiers}
+              vehicles={vehicles}
+              capturePoints={capturePoints}
+              smokeClouds={smokeClouds}
+              pickups={pickups}
+              playerPos={playerPos}
+              playerYaw={playerYaw}
+              soldierR={3.5}
+              showPickups
+            />
+          </svg>
+
+          {/* Zoom controls */}
+          <div className="absolute bottom-3 right-3 flex flex-col gap-1">
+            <button
+              onClick={() => applyZoom(1.25)}
+              className="h-9 w-9 rounded border border-[hsl(var(--hud)/0.5)] bg-background/80 text-lg font-bold text-[hsl(var(--hud))] active:bg-[hsl(var(--hud))] active:text-[hsl(var(--hud-foreground))]"
+            >
+              +
+            </button>
+            <button
+              onClick={() => applyZoom(0.8)}
+              className="h-9 w-9 rounded border border-[hsl(var(--hud)/0.5)] bg-background/80 text-lg font-bold text-[hsl(var(--hud))] active:bg-[hsl(var(--hud))] active:text-[hsl(var(--hud-foreground))]"
+            >
+              −
+            </button>
+            <button
+              onClick={() => { setZoom(1); setCenter(clampCenter({ x: playerPos.x, z: playerPos.z }, 1)); }}
+              className="h-9 w-9 rounded border border-[hsl(var(--hud)/0.5)] bg-background/80 text-[9px] font-bold uppercase text-[hsl(var(--hud))] active:bg-[hsl(var(--hud))] active:text-[hsl(var(--hud-foreground))]"
+            >
+              FIT
+            </button>
+          </div>
+
+          {/* Legend */}
+          <div className="absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded bg-background/60 px-2 py-1.5 text-[9px] backdrop-blur-sm">
+            <LegendDot color="#44ff44" label="YOU" />
+            <LegendDot color="#4488ff" label="BLUE" />
+            <LegendDot color="#ff4444" label="RED" />
+            <LegendDot color="#ffaa20" label="VEHICLE" square />
+            <LegendDot color="#5ee06a" label="LOOT" square />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LegendDot({ color, label, square }: { color: string; label: string; square?: boolean }) {
+  return (
+    <div className="flex items-center gap-1 text-muted-foreground">
+      <span
+        className={square ? "inline-block h-2.5 w-2.5 rounded-[2px]" : "inline-block h-2.5 w-2.5 rounded-full"}
+        style={{ background: color }}
+      />
+      <span className="uppercase tracking-wider">{label}</span>
     </div>
   );
 }
