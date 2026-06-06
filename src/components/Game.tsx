@@ -697,9 +697,16 @@ function Crates() {
   );
 }
 
+// Three raised reinforcement ribs / rolling hoops per drum (top, middle,
+// bottom) used by the ribbed-barrel instanced pass below.
+const BARREL_RIB_YS = [0.36, 0.0, -0.36];
+
 function Barrels() {
   const items = sharedWorld.barrels;
   const meshRef = useRef<THREE.InstancedMesh>(null);
+  // Ribs rendered as a separate instanced torus pass so every barrel gains its
+  // classic ribbed silhouette without per-barrel draw calls.
+  const ribRef = useRef<THREE.InstancedMesh>(null);
   useEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -715,6 +722,24 @@ function Barrels() {
     });
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+    const rib = ribRef.current;
+    if (rib) {
+      const rd = new THREE.Object3D();
+      const rc = new THREE.Color();
+      items.forEach((b, i) => {
+        for (let k = 0; k < BARREL_RIB_YS.length; k++) {
+          rd.position.set(b.pos.x, b.pos.y + 0.55 + BARREL_RIB_YS[k], b.pos.z);
+          rd.rotation.set(Math.PI / 2, 0, 0);
+          rd.updateMatrix();
+          rib.setMatrixAt(i * BARREL_RIB_YS.length + k, rd.matrix);
+          rc.set(b.color).multiplyScalar(0.82);
+          rib.setColorAt(i * BARREL_RIB_YS.length + k, rc);
+        }
+      });
+      rib.instanceMatrix.needsUpdate = true;
+      if (rib.instanceColor) rib.instanceColor.needsUpdate = true;
+    }
   }, [items]);
   // Weathered rusty-metal PBR set for the barrel walls (normal + roughness give
   // dents, weld seams and patchy rust their proper shading), the painted-lid
@@ -743,9 +768,21 @@ function Barrels() {
     ];
   }, [drumPBR, drumTop]);
   return (
-    <instancedMesh ref={meshRef} args={[undefined, undefined, items.length]} castShadow receiveShadow material={barrelMat} frustumCulled={false}>
-      <cylinderGeometry args={[0.35, 0.35, 1.1, 24]} />
-    </instancedMesh>
+    <group>
+      <instancedMesh ref={meshRef} args={[undefined, undefined, items.length]} castShadow receiveShadow material={barrelMat} frustumCulled={false}>
+        <cylinderGeometry args={[0.35, 0.35, 1.1, 32]} />
+      </instancedMesh>
+      <instancedMesh
+        ref={ribRef}
+        args={[undefined, undefined, Math.max(1, items.length * BARREL_RIB_YS.length)]}
+        castShadow
+        receiveShadow
+        frustumCulled={false}
+      >
+        <torusGeometry args={[0.355, 0.035, 8, 28]} />
+        <meshStandardMaterial color="#ffffff" roughness={0.95} metalness={0.55} />
+      </instancedMesh>
+    </group>
   );
 }
 
@@ -1727,124 +1764,258 @@ function BulletTrails() {
 }
 
 // === VEHICLES ===
+// Higher-poly vehicle builders. Each vehicle is assembled from a richer set of
+// primitives (beveled hulls, smooth-segmented wheels with hubs and tyre walls,
+// fenders, glazing, greebles) so the motor pool reads as detailed military
+// hardware rather than flat boxes. Geometry is built once per vehicle instance
+// and reused by Three.js, so the extra polygons are cheap.
+
+// A detailed wheel: dark tyre torus + rim disc + hub cap. Returned as a group
+// already oriented so its axle runs along X (left-right). `r` = tyre radius,
+// `width` = tyre width.
+function makeWheel(r: number, width: number, rimColor = '#33332e'): THREE.Group {
+  const g = new THREE.Group();
+  const tyreMat = new THREE.MeshStandardMaterial({ color: '#141414', roughness: 0.95, metalness: 0.05 });
+  const rimMat = new THREE.MeshStandardMaterial({ color: rimColor, roughness: 0.6, metalness: 0.5 });
+  // Tyre as a torus (rounded cross-section) for a real rubber profile.
+  const tyre = new THREE.Mesh(new THREE.TorusGeometry(r * 0.82, r * 0.28, 12, 24), tyreMat);
+  tyre.rotation.y = Math.PI / 2; // ring faces along X axle
+  tyre.castShadow = true;
+  g.add(tyre);
+  // Solid tyre carcass so there's no see-through hole.
+  const carcass = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.78, r * 0.78, width, 24), tyreMat);
+  carcass.rotation.z = Math.PI / 2;
+  g.add(carcass);
+  // Rim / hub.
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.5, r * 0.5, width * 1.05, 16), rimMat);
+  rim.rotation.z = Math.PI / 2;
+  g.add(rim);
+  // Hub caps on both faces.
+  for (const s of [-1, 1]) {
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.18, r * 0.22, 0.06, 12), rimMat);
+    cap.rotation.z = Math.PI / 2;
+    cap.position.x = s * width * 0.55;
+    g.add(cap);
+  }
+  return g;
+}
+
+// A flat-ish glazing pane (windscreen / window) — tinted, slightly metallic.
+function makeGlass(w: number, h: number, d = 0.05): THREE.Mesh {
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshStandardMaterial({ color: '#1b2630', roughness: 0.15, metalness: 0.6, transparent: true, opacity: 0.78 }),
+  );
+  return m;
+}
+
 function buildJeepMesh(mesh: THREE.Group) {
-  // Body
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(2.2, 0.8, 3.6),
-    new THREE.MeshStandardMaterial({ color: '#4a6a3a', roughness: 0.7 }),
-  );
-  body.position.y = 0.4;
-  body.castShadow = true;
-  mesh.add(body);
-  // Cabin
-  const cabin = new THREE.Mesh(
-    new THREE.BoxGeometry(1.8, 0.7, 1.6),
-    new THREE.MeshStandardMaterial({ color: '#3a5a2a', roughness: 0.6 }),
-  );
-  cabin.position.set(0, 1.15, -0.3);
-  cabin.castShadow = true;
-  mesh.add(cabin);
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.2, 12);
-  const wheelMat = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.9 });
-  for (const [wx, wz] of [[-1.2, 1.2], [1.2, 1.2], [-1.2, -1.2], [1.2, -1.2]]) {
-    const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-    wheel.rotation.z = Math.PI / 2;
-    wheel.position.set(wx, 0.05, wz);
-    mesh.add(wheel);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: '#4a6a3a', roughness: 0.72, metalness: 0.18 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#33402a', roughness: 0.7, metalness: 0.2 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: '#2a2a26', roughness: 0.85 });
+
+  // Chassis rail.
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.25, 3.5), trimMat);
+  chassis.position.y = 0.45; mesh.add(chassis);
+  // Main tub.
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.7, 3.6), bodyMat);
+  body.position.y = 0.78; body.castShadow = true; mesh.add(body);
+  // Hood (sloped forward, -z).
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.35, 1.3), bodyMat);
+  hood.position.set(0, 1.0, -1.0); hood.rotation.x = -0.08; hood.castShadow = true; mesh.add(hood);
+  // Cabin / roll-cage box.
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.7, 1.5), darkMat);
+  cabin.position.set(0, 1.45, 0.3); cabin.castShadow = true; mesh.add(cabin);
+  // Windscreen.
+  const ws = makeGlass(1.7, 0.55); ws.position.set(0, 1.5, -0.45); ws.rotation.x = -0.35; mesh.add(ws);
+  // Fenders over each wheel.
+  const fenderGeo = new THREE.BoxGeometry(0.55, 0.12, 1.0);
+  for (const [fx, fz] of [[-1.05, 1.2], [1.05, 1.2], [-1.05, -1.2], [1.05, -1.2]]) {
+    const f = new THREE.Mesh(fenderGeo, darkMat); f.position.set(fx, 0.78, fz); mesh.add(f);
+  }
+  // Headlights.
+  for (const s of [-1, 1]) {
+    const hl = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 12), new THREE.MeshStandardMaterial({ color: '#e8e2c0', emissive: '#5a5530', roughness: 0.3 }));
+    hl.rotation.x = Math.PI / 2; hl.position.set(s * 0.7, 0.95, -1.62); mesh.add(hl);
+  }
+  // Wheels.
+  for (const [wx, wz] of [[-1.05, 1.25], [1.05, 1.25], [-1.05, -1.25], [1.05, -1.25]]) {
+    const w = makeWheel(0.42, 0.28); w.position.set(wx, 0.4, wz); mesh.add(w);
   }
 }
 
 function buildTankMesh(mesh: THREE.Group) {
-  const hullMat = new THREE.MeshStandardMaterial({ color: '#46502f', roughness: 0.85, metalness: 0.2 });
-  const darkMat = new THREE.MeshStandardMaterial({ color: '#2a2a26', roughness: 0.95 });
-  const barrelMat = new THREE.MeshStandardMaterial({ color: '#3a4028', roughness: 0.7, metalness: 0.3 });
+  const hullMat = new THREE.MeshStandardMaterial({ color: '#46502f', roughness: 0.82, metalness: 0.25 });
+  const hullMat2 = new THREE.MeshStandardMaterial({ color: '#3e4829', roughness: 0.82, metalness: 0.25 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#222220', roughness: 0.95, metalness: 0.1 });
+  const trackMat = new THREE.MeshStandardMaterial({ color: '#1a1a18', roughness: 0.98, metalness: 0.05 });
+  const barrelMat = new THREE.MeshStandardMaterial({ color: '#3a4028', roughness: 0.6, metalness: 0.4 });
 
-  // Lower hull
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.9, 4.8), hullMat);
-  hull.position.y = 0.7;
-  hull.castShadow = true;
-  mesh.add(hull);
+  // Lower hull (main box) + sloped glacis plate at the front.
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.85, 4.6), hullMat);
+  hull.position.y = 0.78; hull.castShadow = true; mesh.add(hull);
+  const glacis = new THREE.Mesh(new THREE.BoxGeometry(2.9, 0.7, 1.3), hullMat2);
+  glacis.position.set(0, 0.7, -2.4); glacis.rotation.x = 0.6; glacis.castShadow = true; mesh.add(glacis);
+  // Upper hull deck (slightly narrower, beveled feel).
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.45, 3.4), hullMat2);
+  deck.position.y = 1.28; deck.castShadow = true; mesh.add(deck);
+  // Rear engine deck grille.
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.12, 1.4), darkMat);
+  grille.position.set(0, 1.52, 1.4); mesh.add(grille);
 
-  // Upper sloped deck
-  const deck = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.5, 3.6), hullMat);
-  deck.position.y = 1.3;
-  deck.castShadow = true;
-  mesh.add(deck);
-
-  // Tracks (left/right)
-  const trackGeo = new THREE.BoxGeometry(0.7, 0.7, 5.0);
-  for (const tx of [-1.45, 1.45]) {
-    const track = new THREE.Mesh(trackGeo, darkMat);
-    track.position.set(tx, 0.45, 0);
-    track.castShadow = true;
-    mesh.add(track);
-  }
-  // Road wheels for a bit of detail
-  const rwGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.2, 10);
-  for (const tx of [-1.45, 1.45]) {
-    for (const tz of [-1.6, -0.55, 0.55, 1.6]) {
-      const rw = new THREE.Mesh(rwGeo, darkMat);
-      rw.rotation.z = Math.PI / 2;
-      rw.position.set(tx, 0.4, tz);
-      mesh.add(rw);
+  // Track assemblies: outer track box + drive sprocket + idler + road wheels.
+  const trackGeo = new THREE.BoxGeometry(0.72, 0.78, 5.1);
+  for (const tx of [-1.5, 1.5]) {
+    const track = new THREE.Mesh(trackGeo, trackMat);
+    track.position.set(tx, 0.5, 0); track.castShadow = true; mesh.add(track);
+    // Fender / track skirt over the top of each track.
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.12, 5.0), hullMat);
+    skirt.position.set(tx, 0.95, 0); mesh.add(skirt);
+    // Road wheels (6 per side) + drive sprocket + idler.
+    for (const tz of [-2.0, -1.2, -0.4, 0.4, 1.2, 2.0]) {
+      const rw = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.28, 14), darkMat);
+      rw.rotation.z = Math.PI / 2; rw.position.set(tx, 0.42, tz); mesh.add(rw);
+      const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.32, 8), trackMat);
+      hub.rotation.z = Math.PI / 2; hub.position.set(tx, 0.42, tz); mesh.add(hub);
     }
   }
 
-  // Turret
-  const turret = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.15, 0.7, 12), hullMat);
-  turret.position.set(0, 1.85, -0.2);
-  turret.castShadow = true;
-  mesh.add(turret);
+  // Turret: main body (segmented cylinder) + sloped front mantlet + bustle.
+  const turret = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 1.2, 0.75, 18), hullMat);
+  turret.position.set(0, 1.9, -0.1); turret.castShadow = true; mesh.add(turret);
+  const bustle = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.6, 1.5), hullMat2);
+  bustle.position.set(0, 1.9, 1.0); bustle.castShadow = true; mesh.add(bustle);
+  // Gun mantlet (rounded block at the turret front).
+  const mantlet = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.7, 0.7), hullMat2);
+  mantlet.position.set(0, 1.95, -1.0); mesh.add(mantlet);
 
-  // Cannon barrel (points forward, -z)
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 3.4, 12), barrelMat);
-  barrel.rotation.x = Math.PI / 2;
-  barrel.position.set(0, 1.9, -2.0);
-  barrel.castShadow = true;
-  mesh.add(barrel);
+  // Cannon barrel with a thermal-sleeve mid section and muzzle brake.
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 3.4, 16), barrelMat);
+  barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 1.98, -2.4); barrel.castShadow = true; mesh.add(barrel);
+  const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.1, 16), barrelMat);
+  sleeve.rotation.x = Math.PI / 2; sleeve.position.set(0, 1.98, -1.7); mesh.add(sleeve);
+  const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.5, 16), darkMat);
+  muzzle.rotation.x = Math.PI / 2; muzzle.position.set(0, 1.98, -3.9); mesh.add(muzzle);
 
-  // Commander hatch
-  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.25, 10), darkMat);
-  hatch.position.set(0, 2.25, -0.1);
-  mesh.add(hatch);
+  // Commander's cupola + hatch ring.
+  const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.3, 14), hullMat);
+  cupola.position.set(0.45, 2.4, 0.3); mesh.add(cupola);
+  const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.1, 14), darkMat);
+  hatch.position.set(0.45, 2.58, 0.3); mesh.add(hatch);
+  // Coaxial / commander's MG.
+  const mg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.0, 8), darkMat);
+  mg.rotation.x = Math.PI / 2; mg.position.set(0.45, 2.6, -0.4); mesh.add(mg);
+  // Stowage boxes on the turret sides.
+  for (const s of [-1, 1]) {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.4, 1.0), darkMat);
+    box.position.set(s * 1.15, 1.95, 0.3); mesh.add(box);
+  }
 }
 
 // --- Military vehicle body builders (shared by the drivable motor pool) -----
 function buildApc(mesh: THREE.Group, color: string) {
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.2 });
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.22 });
+  const mat2 = new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.22 });
+  mat2.color.multiplyScalar(0.9);
   const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.6, 5.2), mat); body.position.y = 1.3; body.castShadow = true; mesh.add(body);
-  // sloped front
-  const nose = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.9, 1.4), mat); nose.position.set(0, 0.9, -2.2); nose.castShadow = true; mesh.add(nose);
-  const cupola = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.7, 1.2), mat); cupola.position.set(0, 2.4, -0.4); cupola.castShadow = true; mesh.add(cupola);
-  const wheelGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.4, 12);
-  for (const wz of [-1.8, -0.6, 0.6, 1.8]) for (const wx of [-1.35, 1.35]) {
-    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.55, wz); mesh.add(w);
+
+  // Hull: main box + sloped glacis + raised rear roof.
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.5, 5.0), mat); body.position.y = 1.35; body.castShadow = true; mesh.add(body);
+  const glacis = new THREE.Mesh(new THREE.BoxGeometry(2.55, 1.0, 1.5), mat2); glacis.position.set(0, 1.0, -2.5); glacis.rotation.x = 0.55; glacis.castShadow = true; mesh.add(glacis);
+  // Side skirts covering the wheel tops.
+  for (const s of [-1, 1]) {
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.6, 4.6), mat2); skirt.position.set(s * 1.32, 0.95, 0); mesh.add(skirt);
+  }
+  // Sloped roofline at the rear (troop compartment).
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.5, 3.0), mat2); roof.position.set(0, 2.2, 0.8); roof.castShadow = true; mesh.add(roof);
+  // Driver vision blocks / glazing.
+  const ws = makeGlass(1.6, 0.4); ws.position.set(0, 1.7, -2.05); ws.rotation.x = -0.4; mesh.add(ws);
+  // Small turret / weapon cupola with an autocannon.
+  const cupola = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, 0.6, 16), mat); cupola.position.set(0, 2.65, -0.2); cupola.castShadow = true; mesh.add(cupola);
+  const gun = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.8, 10), darkMat); gun.rotation.x = Math.PI / 2; gun.position.set(0, 2.75, -1.4); mesh.add(gun);
+  // Hatches on the roof.
+  for (const hz of [0.4, 1.4]) {
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.12, 12), darkMat); h.position.set(0.5, 2.5, hz); mesh.add(h);
+  }
+  // Six road wheels per side with hubs.
+  for (const wz of [-1.9, -0.65, 0.6, 1.85]) for (const wx of [-1.3, 1.3]) {
+    const w = makeWheel(0.62, 0.42); w.position.set(wx, 0.62, wz); mesh.add(w);
+  }
+  // Headlights.
+  for (const s of [-1, 1]) {
+    const hl = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 12), new THREE.MeshStandardMaterial({ color: '#e8e2c0', emissive: '#4a4520', roughness: 0.3 }));
+    hl.rotation.x = Math.PI / 2; hl.position.set(s * 0.9, 1.0, -2.7); mesh.add(hl);
   }
 }
 
 function buildTruck(mesh: THREE.Group, color: string) {
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.2 });
-  const canvasMat = new THREE.MeshStandardMaterial({ color: '#6f6a4a', roughness: 0.95 });
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.84, metalness: 0.2 });
+  const mat2 = new THREE.MeshStandardMaterial({ color, roughness: 0.84, metalness: 0.2 }); mat2.color.multiplyScalar(0.88);
+  const canvasMat = new THREE.MeshStandardMaterial({ color: '#6f6a4a', roughness: 0.97 });
   const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
-  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.8, 2.0), mat); cab.position.set(0, 1.4, -2.4); cab.castShadow = true; mesh.add(cab);
-  const bed = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.0, 4.4), canvasMat); bed.position.set(0, 1.8, 0.9); bed.castShadow = true; mesh.add(bed);
-  const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.5, 6.6), mat); chassis.position.y = 0.7; mesh.add(chassis);
-  const wheelGeo = new THREE.CylinderGeometry(0.6, 0.6, 0.45, 12);
-  for (const wz of [-2.6, 0.0, 1.4, 2.6]) for (const wx of [-1.25, 1.25]) {
-    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.6, wz); mesh.add(w);
+
+  // Chassis rail.
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.4, 6.8), mat2); chassis.position.y = 0.75; mesh.add(chassis);
+  // Cab + sloped hood up front.
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.5, 1.9), mat); cab.position.set(0, 1.6, -2.4); cab.castShadow = true; mesh.add(cab);
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.7, 1.2), mat2); hood.position.set(0, 1.1, -3.4); hood.castShadow = true; mesh.add(hood);
+  // Windscreen + side windows.
+  const ws = makeGlass(2.0, 0.7); ws.position.set(0, 1.85, -3.35); ws.rotation.x = -0.18; mesh.add(ws);
+  for (const s of [-1, 1]) { const sw = makeGlass(0.05, 0.6, 0.9); sw.position.set(s * 1.21, 1.8, -2.4); mesh.add(sw); }
+  // Cargo bed with canvas tilt + supporting ribs.
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.9, 4.2), mat2); bed.position.set(0, 1.35, 0.9); bed.castShadow = true; mesh.add(bed);
+  const tilt = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.5, 4.2), canvasMat); tilt.position.set(0, 2.5, 0.9); tilt.castShadow = true; mesh.add(tilt);
+  // Rounded canvas roof ribs.
+  for (const rz of [-1.0, 0.0, 1.0, 2.0]) {
+    const rib = new THREE.Mesh(new THREE.CylinderGeometry(1.3, 1.3, 0.12, 16, 1, false, 0, Math.PI), canvasMat);
+    rib.rotation.z = Math.PI / 2; rib.rotation.x = Math.PI / 2; rib.position.set(0, 3.25, 0.9 + rz); mesh.add(rib);
+  }
+  // Fenders.
+  for (const [fx, fz] of [[-1.25, -2.6], [1.25, -2.6]]) {
+    const f = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.15, 1.2), mat2); f.position.set(fx, 0.95, fz); mesh.add(f);
+  }
+  // Headlights + bumper.
+  const bumper = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.25, 0.3), darkMat); bumper.position.set(0, 0.85, -4.05); mesh.add(bumper);
+  for (const s of [-1, 1]) {
+    const hl = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.08, 12), new THREE.MeshStandardMaterial({ color: '#e8e2c0', emissive: '#4a4520', roughness: 0.3 }));
+    hl.rotation.x = Math.PI / 2; hl.position.set(s * 0.85, 1.05, -4.05); mesh.add(hl);
+  }
+  // Wheels (dual rear axles).
+  for (const wz of [-2.7, 0.6, 2.0]) for (const wx of [-1.2, 1.2]) {
+    const w = makeWheel(0.65, 0.5); w.position.set(wx, 0.65, wz); mesh.add(w);
   }
 }
 
 function buildHumvee(mesh: THREE.Group, color: string) {
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.2 });
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.84, metalness: 0.2 });
+  const mat2 = new THREE.MeshStandardMaterial({ color, roughness: 0.84, metalness: 0.2 }); mat2.color.multiplyScalar(0.9);
   const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.1, 4.4), mat); body.position.y = 1.0; body.castShadow = true; mesh.add(body);
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.9, 2.2), mat); cabin.position.set(0, 1.85, -0.2); cabin.castShadow = true; mesh.add(cabin);
-  const wheelGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.45, 12);
+
+  // Low wide body + sloped hood.
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.9, 4.4), mat); body.position.y = 1.0; body.castShadow = true; mesh.add(body);
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.45, 1.3), mat2); hood.position.set(0, 1.15, -1.9); hood.rotation.x = -0.06; hood.castShadow = true; mesh.add(hood);
+  // Greenhouse / crew cabin (boxy, sloped windscreen).
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.95, 2.4), mat); cabin.position.set(0, 1.85, 0.0); cabin.castShadow = true; mesh.add(cabin);
+  const ws = makeGlass(2.05, 0.7); ws.position.set(0, 1.95, -1.2); ws.rotation.x = -0.32; mesh.add(ws);
+  for (const s of [-1, 1]) { const sw = makeGlass(0.05, 0.55, 1.7); sw.position.set(s * 1.16, 1.9, 0.1); mesh.add(sw); }
+  const rw = makeGlass(2.0, 0.5); rw.position.set(0, 1.95, 1.2); mesh.add(rw);
+  // Roof-mounted turret ring + MG.
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.08, 8, 18), darkMat); ring.rotation.x = Math.PI / 2; ring.position.set(0, 2.35, 0.1); mesh.add(ring);
+  const mg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.1, 10), darkMat); mg.rotation.x = Math.PI / 2; mg.position.set(0, 2.5, -0.6); mesh.add(mg);
+  // Wide fender flares.
+  const fenderGeo = new THREE.BoxGeometry(0.55, 0.2, 1.2);
+  for (const [fx, fz] of [[-1.25, 1.5], [1.25, 1.5], [-1.25, -1.5], [1.25, -1.5]]) {
+    const f = new THREE.Mesh(fenderGeo, mat2); f.position.set(fx, 0.95, fz); mesh.add(f);
+  }
+  // Bumper + headlights.
+  const bumper = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.25, 0.3), darkMat); bumper.position.set(0, 0.85, -2.3); mesh.add(bumper);
+  for (const s of [-1, 1]) {
+    const hl = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 12), new THREE.MeshStandardMaterial({ color: '#e8e2c0', emissive: '#4a4520', roughness: 0.3 }));
+    hl.rotation.x = Math.PI / 2; hl.position.set(s * 0.95, 1.05, -2.32); mesh.add(hl);
+  }
+  // Big off-road wheels.
   for (const [wx, wz] of [[-1.2, 1.5], [1.2, 1.5], [-1.2, -1.5], [1.2, -1.5]]) {
-    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.55, wz); mesh.add(w);
+    const w = makeWheel(0.6, 0.5); w.position.set(wx, 0.58, wz); mesh.add(w);
   }
 }
 
