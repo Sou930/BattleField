@@ -110,12 +110,14 @@ export class GameEngine {
   private spawnVehicles() {
     const half = WORLD_SIZE / 2;
     const spawns = [
-      { x: -30, z: half - 35, kind: "jeep" as const },
-      { x: 30, z: half - 35, kind: "jeep" as const },
+      // Drivable jeeps just outside the base gate and forward in the field.
+      { x: -14, z: BASE_POS.z - 40, kind: "jeep" as const },
+      { x: 14, z: BASE_POS.z - 40, kind: "jeep" as const },
       { x: -30, z: -half + 35, kind: "jeep" as const },
       { x: 30, z: -half + 35, kind: "jeep" as const },
-      // Tank parked inside the home base compound, facing out (north).
-      { x: BASE_POS.x, z: BASE_POS.z, kind: "tank" as const },
+      // A drivable tank staged just outside the base gate, facing out (north)
+      // so the player can climb in and drive straight onto the battlefield.
+      { x: 0, z: BASE_POS.z - 100, kind: "tank" as const },
     ];
     let vid = 1;
     for (const sp of spawns) {
@@ -196,6 +198,15 @@ export class GameEngine {
         if (x > b.min.x - 1.5 && x < b.max.x + 1.5 && z > b.min.z - 1.5 && z < b.max.z + 1.5) {
           inside = true;
           break;
+        }
+      }
+      // Don't spawn on top of parked motor-pool vehicles.
+      if (!inside) {
+        for (const pv of this.world.parkedVehicles) {
+          if (Math.abs(x - pv.pos.x) < 3 && Math.abs(z - pv.pos.z) < 4) {
+            inside = true;
+            break;
+          }
         }
       }
       if (!inside && Math.abs(x) < WORLD_SIZE / 2 - 5 && Math.abs(z) < WORLD_SIZE / 2 - 5) {
