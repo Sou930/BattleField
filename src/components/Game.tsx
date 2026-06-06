@@ -209,6 +209,7 @@ function Scene({ engine }: { engine: GameEngine }) {
       <Walls />
       <Roofs />
       <Crates />
+      <Containers />
       <Barrels />
       <Sandbags />
       <Palms />
@@ -229,6 +230,7 @@ function Scene({ engine }: { engine: GameEngine }) {
       <BulletTrails />
       <MuzzleFlashes />
       <VehiclesScene />
+      <ParkedVehiclesScene />
       <ViewModel />
     </>
   );
@@ -542,7 +544,7 @@ function Roads() {
   return (
     <group>
       {sharedWorld.roads.map((r, i) => (
-        <mesh key={i} position={[r.pos.x, 0.02, r.pos.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow material={mat}>
+        <mesh key={i} position={[r.pos.x, r.pos.y, r.pos.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow material={mat}>
           <planeGeometry args={[r.size.x, r.size.z]} />
         </mesh>
       ))}
@@ -1009,6 +1011,54 @@ function Awnings() {
   );
 }
 
+// Helper: instanced window glass/frame panes. With the much denser city this
+// now renders tens of thousands of windows, so each layer (lit glass, dark
+// glass, frame) is a single InstancedMesh instead of thousands of meshes.
+function InstancedWindowPanes({
+  items,
+  material,
+  inset,
+  depthScale,
+}: {
+  items: typeof sharedWorld.windows;
+  material: THREE.Material;
+  inset: number; // scale factor applied to the pane (1 = full frame size)
+  depthScale?: number; // z scale factor (glass slightly proud to avoid z-fight)
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const dummy = new THREE.Object3D();
+    const dz = depthScale ?? 1;
+    items.forEach((w, i) => {
+      dummy.position.copy(w.pos);
+      dummy.scale.set(
+        w.size.x * inset,
+        w.size.y * inset,
+        Math.max(w.size.z, 0.04) * dz,
+      );
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = false;
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
+  }, [items, inset, depthScale]);
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, Math.max(items.length, 1)]}
+      material={material}
+      frustumCulled={false}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+    </instancedMesh>
+  );
+}
+
 function Windows() {
   // Two materials: lit (emissive warm) and dark glass
   const litMat = useMemo(
@@ -1036,28 +1086,23 @@ function Windows() {
     () => new THREE.MeshStandardMaterial({ color: "#3a2818", roughness: 0.8 }),
     [],
   );
+
+  // Split windows into lit / dark so each glass colour is one instanced draw.
+  const { lit, dark } = useMemo(() => {
+    const lit: typeof sharedWorld.windows = [];
+    const dark: typeof sharedWorld.windows = [];
+    for (const w of sharedWorld.windows) (w.lit ? lit : dark).push(w);
+    return { lit, dark };
+  }, []);
+
   return (
     <group>
-      {sharedWorld.windows.map((w, i) => (
-        <group key={i} position={w.pos.toArray()}>
-          {/* glass */}
-          <mesh material={w.lit ? litMat : darkMat}>
-            <boxGeometry args={[w.size.x * 0.85, w.size.y * 0.85, Math.max(w.size.z, 0.04)]} />
-          </mesh>
-          {/* frame */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[w.size.x, w.size.y, Math.max(w.size.z, 0.04) * 0.9]} />
-          </mesh>
-          {/* horizontal mullion */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[w.size.x * 0.95, 0.04, Math.max(w.size.z, 0.04) * 1.05]} />
-          </mesh>
-          {/* vertical mullion */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[0.04, w.size.y * 0.95, Math.max(w.size.z, 0.04) * 1.05]} />
-          </mesh>
-        </group>
-      ))}
+      {/* Window frames (one draw call for every window). */}
+      <InstancedWindowPanes items={sharedWorld.windows} material={frameMat} inset={1} />
+      {/* Lit glass panes (inset inside the frame, slightly proud to avoid z-fight). */}
+      <InstancedWindowPanes items={lit} material={litMat} inset={0.82} depthScale={1.4} />
+      {/* Dark glass panes. */}
+      <InstancedWindowPanes items={dark} material={darkMat} inset={0.82} depthScale={1.4} />
     </group>
   );
 }
@@ -1764,6 +1809,115 @@ function buildTankMesh(mesh: THREE.Group) {
   const hatch = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.25, 10), darkMat);
   hatch.position.set(0, 2.25, -0.1);
   mesh.add(hatch);
+}
+
+// --- Static (parked, non-drivable) military vehicles for the motor pool ----
+function buildParkedTank(mesh: THREE.Group, color: string) {
+  const hullMat = new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.15 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#2a2a26', roughness: 0.95 });
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.0, 5.4), hullMat); hull.position.y = 0.8; hull.castShadow = true; mesh.add(hull);
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.5, 3.8), hullMat); deck.position.y = 1.45; deck.castShadow = true; mesh.add(deck);
+  for (const tx of [-1.55, 1.55]) {
+    const track = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.8, 5.6), darkMat); track.position.set(tx, 0.5, 0); track.castShadow = true; mesh.add(track);
+  }
+  const turret = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.25, 0.75, 12), hullMat); turret.position.set(0, 2.0, -0.2); turret.castShadow = true; mesh.add(turret);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.19, 3.8, 12), darkMat); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 2.05, -2.2); barrel.castShadow = true; mesh.add(barrel);
+}
+
+function buildApc(mesh: THREE.Group, color: string) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.2 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.6, 5.2), mat); body.position.y = 1.3; body.castShadow = true; mesh.add(body);
+  // sloped front
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.9, 1.4), mat); nose.position.set(0, 0.9, -2.2); nose.castShadow = true; mesh.add(nose);
+  const cupola = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.7, 1.2), mat); cupola.position.set(0, 2.4, -0.4); cupola.castShadow = true; mesh.add(cupola);
+  const wheelGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.4, 12);
+  for (const wz of [-1.8, -0.6, 0.6, 1.8]) for (const wx of [-1.35, 1.35]) {
+    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.55, wz); mesh.add(w);
+  }
+}
+
+function buildTruck(mesh: THREE.Group, color: string) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.2 });
+  const canvasMat = new THREE.MeshStandardMaterial({ color: '#6f6a4a', roughness: 0.95 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.8, 2.0), mat); cab.position.set(0, 1.4, -2.4); cab.castShadow = true; mesh.add(cab);
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.0, 4.4), canvasMat); bed.position.set(0, 1.8, 0.9); bed.castShadow = true; mesh.add(bed);
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.5, 6.6), mat); chassis.position.y = 0.7; mesh.add(chassis);
+  const wheelGeo = new THREE.CylinderGeometry(0.6, 0.6, 0.45, 12);
+  for (const wz of [-2.6, 0.0, 1.4, 2.6]) for (const wx of [-1.25, 1.25]) {
+    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.6, wz); mesh.add(w);
+  }
+}
+
+function buildHumvee(mesh: THREE.Group, color: string) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.2 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.1, 4.4), mat); body.position.y = 1.0; body.castShadow = true; mesh.add(body);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.9, 2.2), mat); cabin.position.set(0, 1.85, -0.2); cabin.castShadow = true; mesh.add(cabin);
+  const wheelGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.45, 12);
+  for (const [wx, wz] of [[-1.2, 1.5], [1.2, 1.5], [-1.2, -1.5], [1.2, -1.5]]) {
+    const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.55, wz); mesh.add(w);
+  }
+}
+
+function ParkedVehiclesScene() {
+  const ref = useRef<THREE.Group>(null);
+  const built = useRef(false);
+  useEffect(() => {
+    const g = ref.current;
+    if (!g || built.current) return;
+    built.current = true;
+    for (const pv of sharedWorld.parkedVehicles) {
+      const m = new THREE.Group();
+      if (pv.kind === "tank") buildParkedTank(m, pv.color);
+      else if (pv.kind === "apc") buildApc(m, pv.color);
+      else if (pv.kind === "truck") buildTruck(m, pv.color);
+      else buildHumvee(m, pv.color);
+      m.position.copy(pv.pos);
+      m.rotation.y = pv.yaw;
+      g.add(m);
+    }
+  }, []);
+  return <group ref={ref} />;
+}
+
+function Containers() {
+  const items = sharedWorld.containers;
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  // Reuse the rusty-metal PBR set so containers read as corrugated steel.
+  const pbr = useTiledPBR(barrelDiffUrl, barrelNorUrl, barrelRoughUrl, 2, 1, 8);
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    items.forEach((c, i) => {
+      dummy.position.set(c.pos.x, c.pos.y + c.size.y / 2, c.pos.z);
+      dummy.rotation.set(0, c.yaw, 0);
+      dummy.scale.set(c.size.x, c.size.y, c.size.z);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      color.set(c.color);
+      mesh.setColorAt(i, color);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [items]);
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, Math.max(1, items.length)]} castShadow receiveShadow>
+      <boxGeometry args={[1, 1, 1]} />
+      <meshStandardMaterial
+        map={pbr.map}
+        normalMap={pbr.normalMap}
+        roughnessMap={pbr.roughnessMap}
+        normalScale={new THREE.Vector2(0.5, 0.5)}
+        color="#ffffff"
+        roughness={0.9}
+        metalness={0.3}
+      />
+    </instancedMesh>
+  );
 }
 
 function VehiclesScene() {
