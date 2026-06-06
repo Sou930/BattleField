@@ -194,7 +194,7 @@ export interface Vehicle {
   yaw: number;
   hp: number;
   hpMax: number;
-  kind: "jeep" | "tank";
+  kind: "jeep" | "tank" | "apc" | "truck" | "humvee";
   speed: number;
   team: Team | null;
   destroyed: boolean;

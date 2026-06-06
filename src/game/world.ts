@@ -783,6 +783,13 @@ export function generateWorld(): World {
     // keep mounds out of the flat airfield and city
     if (Math.abs(px - af.x) < AIRFIELD_FLAT_HALF_X + 30 && Math.abs(pz - af.z) < AIRFIELD_FLAT_HALF_Z + 30) continue;
     if (Math.hypot(px - cityCX, pz - cityCZ) < CITY_FLAT_RADIUS + 30) continue;
+    // Keep mounds out of the (flattened) home base too. Authored hills are
+    // added on top of the base terrain by terrainHeightAt(), so a mound here
+    // would raise the ground *inside* the flattened compound and read as
+    // "terrain stacked on terrain" poking through the apron. The mound radius
+    // can reach ~115, so pad the exclusion generously.
+    const baseR = 115 + 30;
+    if (Math.abs(px - BASE_POS.x) < BASE_HALF + baseR && Math.abs(pz - BASE_POS.z) < BASE_HALF + baseR) continue;
     const radius = 45 + rng() * 70;
     const height = 3 + rng() * 7;
     hills.push({ pos: new THREE.Vector3(px, 0, pz), radius, height, color: rng() > 0.45 ? "#8a7a54" : "#6f8152" });
@@ -967,7 +974,7 @@ export function generateWorld(): World {
   }
 
   // --- Home base (large forward-operating airbase) near the south edge ----
-  const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates);
+  const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads);
 
   const walls: Wall[] = [];
   for (const b of buildings) walls.push(...b.walls);
@@ -1055,6 +1062,7 @@ function buildBaseCompound(
   sandbags: Wall[],
   lamps: Lamp[],
   crates: Crate[],
+  roads: Road[],
 ): Wall[] {
   const walls: Wall[] = [];
   const cx = BASE_POS.x;
@@ -1062,12 +1070,14 @@ function buildBaseCompound(
   const half = BASE_HALF;
 
   // --- Concrete apron covering the whole compound floor ------------------
-  // (Pushed as a thin "floor" wall so it renders as a light concrete pad.)
-  walls.push({
-    pos: new THREE.Vector3(cx, 0.04, cz),
-    size: new THREE.Vector3(half * 2 - 2, 0.08, half * 2 - 2),
+  // Rendered as a thin road decal (NOT a solid floor box) so it sits flush on
+  // the flattened terrain instead of stacking a second slab of "ground" on top
+  // of it. The decal is also excluded from collision, so the player no longer
+  // bumps an invisible curb when walking across the compound.
+  roads.push({
+    pos: new THREE.Vector3(cx, 0.02, cz),
+    size: new THREE.Vector3(half * 2 - 2, 0.02, half * 2 - 2),
     color: "#9a958a",
-    kind: "floor",
   });
 
   // --- Perimeter T-wall (concrete blast wall) with a north gate ----------
