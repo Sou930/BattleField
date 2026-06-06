@@ -494,21 +494,50 @@ export function generateWorld(): World {
   // revetments. Rendered using the generic road / wall / building primitives.
   const af = { x: AIRFIELD_CENTER_X, z: AIRFIELD_CENTER_Z };
   const runwayLen = WORLD_SIZE * 0.6;
-  const runwayWidth = 26;
+  const runwayWidth = 30;
+
+  // Surface / marking paint heights. The airfield is dead-level, so the only
+  // thing keeping the runway visible above the terrain is the road decal's
+  // y-offset. Earlier the surface (0.01) and the terrain (0.0) were almost
+  // coplanar, so the runway z-fought with the sand and effectively "vanished"
+  // (looked buried) at a distance. Lift the asphalt clearly above the ground
+  // and stack the painted markings on distinct layers above that so nothing
+  // flickers.
+  const Y_SURFACE = 0.06; // asphalt / concrete pad
+  const Y_SHOULDER = 0.05; // shoulder pad (just under the runway edge)
+  const Y_PAINT = 0.12; // painted markings (centerline, edges, threshold)
+  const Y_PAINT2 = 0.14; // top paint layer (designation numbers)
+
+  // Sandy/graded shoulder strip running the length of the runway so the dark
+  // asphalt reads as a real runway sitting on a prepared bed rather than a bare
+  // stripe dropped on the desert.
+  roads.push({
+    pos: new THREE.Vector3(af.x, Y_SHOULDER, af.z),
+    size: new THREE.Vector3(runwayWidth + 22, 0.02, runwayLen + 24),
+    color: "#5a5247",
+  });
 
   // Main runway (dark asphalt strip).
   roads.push({
-    pos: new THREE.Vector3(af.x, 0.01, af.z),
+    pos: new THREE.Vector3(af.x, Y_SURFACE, af.z),
     size: new THREE.Vector3(runwayWidth, 0.02, runwayLen),
-    color: "#34373c",
+    color: "#2f3236",
   });
+  // Solid white edge stripes down both sides of the runway.
+  for (const side of [-1, 1]) {
+    roads.push({
+      pos: new THREE.Vector3(af.x + side * (runwayWidth / 2 - 1.0), Y_PAINT, af.z),
+      size: new THREE.Vector3(0.6, 0.02, runwayLen - 24),
+      color: "#e8e8dc",
+    });
+  }
   // Painted runway centerline dashes.
   const dashCount = 40;
   for (let i = 0; i < dashCount; i++) {
     const dz = -runwayLen / 2 + (i + 0.5) * (runwayLen / dashCount);
     roads.push({
-      pos: new THREE.Vector3(af.x, 0.03, af.z + dz),
-      size: new THREE.Vector3(1.0, 0.02, runwayLen / dashCount * 0.5),
+      pos: new THREE.Vector3(af.x, Y_PAINT, af.z + dz),
+      size: new THREE.Vector3(1.0, 0.02, (runwayLen / dashCount) * 0.5),
       color: "#d8d8c8",
     });
   }
@@ -516,26 +545,71 @@ export function generateWorld(): World {
   for (const end of [-1, 1]) {
     for (let k = -3; k <= 3; k++) {
       roads.push({
-        pos: new THREE.Vector3(af.x + k * 3, 0.03, af.z + end * (runwayLen / 2 - 8)),
+        pos: new THREE.Vector3(af.x + k * 3, Y_PAINT, af.z + end * (runwayLen / 2 - 8)),
         size: new THREE.Vector3(1.8, 0.02, 10),
         color: "#e6e6da",
       });
     }
+    // Aiming-point markers (two thick bars) a little inboard of each threshold.
+    for (const side of [-1, 1]) {
+      roads.push({
+        pos: new THREE.Vector3(af.x + side * 3.2, Y_PAINT, af.z + end * (runwayLen / 2 - 34)),
+        size: new THREE.Vector3(2.6, 0.02, 14),
+        color: "#e6e6da",
+      });
+    }
   }
+  // Big runway designation numbers ("18 / 36") painted near each end, built up
+  // from a few bars so the strip reads unmistakably as a runway from the air or
+  // the ground.
+  const drawDigitBars = (cx: number, cz: number, bars: [number, number, number, number][]) => {
+    for (const [ox, oz, w, d] of bars) {
+      roads.push({
+        pos: new THREE.Vector3(cx + ox, Y_PAINT2, cz + oz),
+        size: new THREE.Vector3(w, 0.02, d),
+        color: "#eeeee2",
+      });
+    }
+  };
+  // South end "18", north end "36" (simplified glyph blocks).
+  drawDigitBars(af.x - 3.2, af.z + runwayLen / 2 - 52, [[0, 0, 0.9, 7]]); // 1
+  drawDigitBars(af.x + 1.0, af.z + runwayLen / 2 - 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 1.5, 0.9, 3.0], [-1.4, -1.5, 0.9, 3.0],
+  ]); // 8 (approx)
+  drawDigitBars(af.x - 3.2, af.z - runwayLen / 2 + 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 1.5, 0.9, 3.0], [1.4, -1.5, 0.9, 3.0],
+  ]); // 3
+  drawDigitBars(af.x + 1.0, af.z - runwayLen / 2 + 52, [
+    [0, 3.0, 3.0, 0.9], [0, 0, 3.0, 0.9], [0, -3.0, 3.0, 0.9],
+    [1.4, 0, 0.9, 6.0], [-1.4, 1.5, 0.9, 3.0],
+  ]); // 6
 
   // Parallel taxiway east of the runway.
   const taxiX = af.x + 60;
   roads.push({
-    pos: new THREE.Vector3(taxiX, 0.01, af.z),
-    size: new THREE.Vector3(14, 0.02, runwayLen * 0.92),
-    color: "#3c4046",
+    pos: new THREE.Vector3(taxiX, Y_SURFACE, af.z),
+    size: new THREE.Vector3(16, 0.02, runwayLen * 0.92),
+    color: "#3a3e44",
+  });
+  // Yellow taxiway centerline.
+  roads.push({
+    pos: new THREE.Vector3(taxiX, Y_PAINT, af.z),
+    size: new THREE.Vector3(0.5, 0.02, runwayLen * 0.9),
+    color: "#d6b73c",
   });
   // Connector taxiways linking runway and taxiway.
   for (const cz of [-runwayLen * 0.32, 0, runwayLen * 0.32]) {
     roads.push({
-      pos: new THREE.Vector3((af.x + taxiX) / 2, 0.01, af.z + cz),
+      pos: new THREE.Vector3((af.x + taxiX) / 2, Y_SURFACE, af.z + cz),
       size: new THREE.Vector3(taxiX - af.x, 0.02, 12),
-      color: "#3c4046",
+      color: "#3a3e44",
+    });
+    roads.push({
+      pos: new THREE.Vector3((af.x + taxiX) / 2, Y_PAINT, af.z + cz),
+      size: new THREE.Vector3(taxiX - af.x - 4, 0.02, 0.5),
+      color: "#d6b73c",
     });
   }
 
@@ -544,10 +618,20 @@ export function generateWorld(): World {
   const apronW = 110;
   const apronD = runwayLen * 0.55;
   roads.push({
-    pos: new THREE.Vector3(apronX, 0.01, af.z),
+    pos: new THREE.Vector3(apronX, Y_SURFACE, af.z),
     size: new THREE.Vector3(apronW, 0.02, apronD),
     color: "#9a958a",
   });
+  // Apron parking-spot outlines (rows of yellow boxes) so the flight line looks
+  // organised and detailed rather than a blank slab.
+  for (let r = 0; r < 6; r++) {
+    const pz = af.z - apronD / 2 + 30 + r * (apronD - 60) / 5;
+    roads.push({
+      pos: new THREE.Vector3(apronX, Y_PAINT, pz),
+      size: new THREE.Vector3(apronW - 26, 0.02, 0.4),
+      color: "#cdb24a",
+    });
+  }
 
   // Hangars: large, low, wide buildings along the back (west) edge of the apron.
   const hangarColor = "#5d6b74";
@@ -587,13 +671,13 @@ export function generateWorld(): World {
     crates.push({ pos: new THREE.Vector3(px + 4, 0.8, hz), size: 1.6, color: "#6f757d" });
   }
 
-  // Control tower: a tall slim building at the south end of the apron.
+  // Control tower: a tall slim shaft topped with a cantilevered glass cab and
+  // an antenna mast — a recognisable ATC tower silhouette rather than two plain
+  // stacked boxes.
   {
     const tx = apronX + apronW / 2 - 16;
     const tz = af.z + apronD / 2 - 24;
-    buildings.push(makeBuilding(rng, tx, tz, 9, 9, STOREY_HEIGHT * 7));
-    // glass cab on top suggested with a wider parapet box
-    buildings.push(makeBuilding(rng, tx, tz, 12, 12, STOREY_HEIGHT * 1));
+    buildAirfieldTower(buildings, tx, tz, 0);
   }
 
   // Jet-blast revetments / fuel storage on the apron: rows of blast walls and
@@ -1074,11 +1158,65 @@ function buildBaseCompound(
   // the flattened terrain instead of stacking a second slab of "ground" on top
   // of it. The decal is also excluded from collision, so the player no longer
   // bumps an invisible curb when walking across the compound.
+  //
+  // The apron is lifted clearly above the (flattened) terrain. Previously it
+  // sat at y=0.02 — almost coplanar with the sand — so it z-fought and the
+  // concrete effectively "vanished", leaving the compound looking like bare
+  // desert with the runway buried. The new height stack puts the pad well above
+  // the ground and the painted markings above that.
+  const APRON_Y = 0.05;
+  const PAINT_Y = 0.16;
   roads.push({
-    pos: new THREE.Vector3(cx, 0.02, cz),
+    pos: new THREE.Vector3(cx, APRON_Y, cz),
     size: new THREE.Vector3(half * 2 - 2, 0.02, half * 2 - 2),
     color: "#9a958a",
   });
+
+  // --- Operational runway down the middle of the compound ----------------
+  // A dark asphalt runway runs north-south through the base so it reads as a
+  // working forward airbase (and the player has an obvious open landing strip).
+  const rwW = 26;
+  const rwLen = half * 2 - 24;
+  // Shoulder bed under the runway.
+  roads.push({
+    pos: new THREE.Vector3(cx - half * 0.32, APRON_Y + 0.03, cz),
+    size: new THREE.Vector3(rwW + 14, 0.02, rwLen + 10),
+    color: "#5a5247",
+  });
+  // Asphalt surface.
+  roads.push({
+    pos: new THREE.Vector3(cx - half * 0.32, APRON_Y + 0.06, cz),
+    size: new THREE.Vector3(rwW, 0.02, rwLen),
+    color: "#2f3236",
+  });
+  // Centerline dashes.
+  const baseDashes = 22;
+  for (let i = 0; i < baseDashes; i++) {
+    const dz = -rwLen / 2 + (i + 0.5) * (rwLen / baseDashes);
+    roads.push({
+      pos: new THREE.Vector3(cx - half * 0.32, PAINT_Y, cz + dz),
+      size: new THREE.Vector3(0.9, 0.02, (rwLen / baseDashes) * 0.5),
+      color: "#d8d8c8",
+    });
+  }
+  // Edge stripes.
+  for (const side of [-1, 1]) {
+    roads.push({
+      pos: new THREE.Vector3(cx - half * 0.32 + side * (rwW / 2 - 0.9), PAINT_Y, cz),
+      size: new THREE.Vector3(0.5, 0.02, rwLen - 14),
+      color: "#e8e8dc",
+    });
+  }
+  // Threshold piano-keys at both ends.
+  for (const end of [-1, 1]) {
+    for (let k = -3; k <= 3; k++) {
+      roads.push({
+        pos: new THREE.Vector3(cx - half * 0.32 + k * 2.6, PAINT_Y, cz + end * (rwLen / 2 - 6)),
+        size: new THREE.Vector3(1.5, 0.02, 8),
+        color: "#e6e6da",
+      });
+    }
+  }
 
   // --- Perimeter T-wall (concrete blast wall) with a north gate ----------
   const wallH = 5.5;
@@ -1112,12 +1250,9 @@ function buildBaseCompound(
   const towerZ = cz + half * 0.45;
   const cmd = makeBuilding(rng, towerX - 16, towerZ, 26, 18, STOREY_HEIGHT * 3);
   buildings.push(cmd);
-  // Slim control tower shaft + glass cab on top.
-  const tower = makeBuilding(rng, towerX, towerZ, 9, 9, STOREY_HEIGHT * 7);
-  buildings.push(tower);
-  const cab = makeBuilding(rng, towerX, towerZ, 12, 12, STOREY_HEIGHT * 1);
-  raiseBuilding(cab, STOREY_HEIGHT * 7);
-  buildings.push(cab);
+  // Detailed ATC tower: tapered shaft + cantilevered glass cab + railing +
+  // antenna mast (shared with the Nellis airfield tower).
+  buildAirfieldTower(buildings, towerX, towerZ, 0);
 
   // --- Row of hangars along the west wall, doors facing the apron (+x) ----
   const hangarColor = "#5d6b74";
@@ -1210,6 +1345,67 @@ function buildBaseCompound(
   }
 
   return walls;
+}
+
+// Build a detailed air-traffic-control tower at (tx, tz) seated on ground
+// height `baseY`. Produces: a tapered concrete shaft, a wider cantilevered
+// glass observation cab with a slanted-out window band and a railing parapet,
+// a flat roof, and a thin antenna mast. Pushed into `buildings` as collidable
+// structures (cab carries `info` so it can host windows/decoration).
+function buildAirfieldTower(buildings: Building[], tx: number, tz: number, baseY: number) {
+  const shaftH = STOREY_HEIGHT * 7; // ~24m shaft
+  const shaftW = 8;
+  const cabH = STOREY_HEIGHT * 1.6;
+  const cabW = 13; // cab overhangs the shaft on all sides
+  const concrete = "#8d8f93";
+  const glass = "#3c5d72";
+  const roofCol = "#54585d";
+
+  const walls: Wall[] = [];
+  const wt = 0.5;
+  const hw = shaftW / 2;
+  // Four shaft walls (hollow so it reads as a real tower, with stair access
+  // provided elsewhere is unnecessary — it is set dressing/cover here).
+  walls.push({ pos: new THREE.Vector3(tx, baseY + shaftH / 2, tz + hw), size: new THREE.Vector3(shaftW, shaftH, wt), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx, baseY + shaftH / 2, tz - hw), size: new THREE.Vector3(shaftW, shaftH, wt), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx + hw, baseY + shaftH / 2, tz), size: new THREE.Vector3(wt, shaftH, shaftW), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx - hw, baseY + shaftH / 2, tz), size: new THREE.Vector3(wt, shaftH, shaftW), color: concrete, kind: "wall" });
+
+  // Cab floor slab (cantilevered wider than the shaft).
+  const cabBaseY = baseY + shaftH;
+  walls.push({ pos: new THREE.Vector3(tx, cabBaseY + 0.15, tz), size: new THREE.Vector3(cabW + 0.6, 0.4, cabW + 0.6), color: roofCol, kind: "roof" });
+
+  // Glass observation band (four tinted-glass walls around the cab).
+  const chw = cabW / 2;
+  const cy = cabBaseY + 0.4 + cabH / 2;
+  walls.push({ pos: new THREE.Vector3(tx, cy, tz + chw), size: new THREE.Vector3(cabW, cabH, 0.35), color: glass, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx, cy, tz - chw), size: new THREE.Vector3(cabW, cabH, 0.35), color: glass, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx + chw, cy, tz), size: new THREE.Vector3(0.35, cabH, cabW), color: glass, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx - chw, cy, tz), size: new THREE.Vector3(0.35, cabH, cabW), color: glass, kind: "wall" });
+
+  // Cab roof slab + low parapet/railing around the roof.
+  const roofY = cabBaseY + 0.4 + cabH;
+  walls.push({ pos: new THREE.Vector3(tx, roofY + 0.2, tz), size: new THREE.Vector3(cabW + 1.0, 0.45, cabW + 1.0), color: roofCol, kind: "roof" });
+  const pH = 0.8;
+  const pY = roofY + 0.45 + pH / 2;
+  walls.push({ pos: new THREE.Vector3(tx, pY, tz + chw + 0.4), size: new THREE.Vector3(cabW + 1.0, pH, 0.25), color: roofCol, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx, pY, tz - chw - 0.4), size: new THREE.Vector3(cabW + 1.0, pH, 0.25), color: roofCol, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx + chw + 0.4, pY, tz), size: new THREE.Vector3(0.25, pH, cabW + 1.0), color: roofCol, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx - chw - 0.4, pY, tz), size: new THREE.Vector3(0.25, pH, cabW + 1.0), color: roofCol, kind: "barrier" });
+
+  // Antenna mast on the roof.
+  walls.push({ pos: new THREE.Vector3(tx, roofY + 0.45 + 3.0, tz), size: new THREE.Vector3(0.3, 6.0, 0.3), color: "#cf3b2f", kind: "pillar" });
+
+  buildings.push({
+    walls,
+    min: new THREE.Vector3(tx - chw, baseY, tz - chw),
+    max: new THREE.Vector3(tx + chw, roofY, tz + chw),
+    info: {
+      cx: tx, cz: tz, w: shaftW, d: shaftW, h: shaftH,
+      floors: 1, floorH: shaftH, doorSide: 1,
+      color: concrete, roofColor: roofCol, hasParapet: false,
+    },
+  });
 }
 
 function insideAnyBuilding(p: THREE.Vector3, buildings: Building[], pad: number) {
