@@ -76,6 +76,11 @@ export interface Soldier {
   stuckTimer: number;
   lastPosCheck: THREE.Vector3;
   squadOffset: THREE.Vector3;
+  // Locomotion animation: advancing gait phase + how fast they are moving
+  // (0 = idle, 1 = walk, ~2 = full sprint). Used by the renderer to swing the
+  // legs/arms so soldiers visibly walk and run.
+  animPhase: number;
+  moveSpeedNorm: number;
 }
 
 export type Enemy = Soldier;

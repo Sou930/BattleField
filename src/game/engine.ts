@@ -227,6 +227,8 @@ export class GameEngine {
       stuckTimer: 0,
       lastPosCheck: new THREE.Vector3(spawn.x, SOLDIER_HEIGHT, spawn.z),
       squadOffset: new THREE.Vector3((Math.random() - 0.5) * 7, 0, (Math.random() - 0.5) * 7),
+      animPhase: Math.random() * Math.PI * 2,
+      moveSpeedNorm: 0,
     };
     this.state.soldiers.push(s);
   }
@@ -1167,7 +1169,7 @@ export class GameEngine {
           toGoal.y = 0;
         }
         const move = toGoal.lengthSq() > 0 ? toGoal.clone().normalize() : new THREE.Vector3();
-        this.steerAndMove(s, move, 1.8 * classSpec.speedMult, dt);
+        this.steerAndMove(s, move, 2.8 * classSpec.speedMult, dt);
         s.desiredYaw = Math.atan2(-move.x, -move.z);
         s.yaw += this.shortAngle(s.desiredYaw - s.yaw) * Math.min(1, dt * 4);
         continue;
@@ -1280,7 +1282,7 @@ export class GameEngine {
             if (coverDist > 0.9) {
               // Still moving to the cover spot — sprint there.
               move.copy(toCover.normalize());
-              speedMult = 1.45;
+              speedMult = 1.9;
             } else {
               // In position: hug the spot with a small peek when ready to fire.
               const settled = coverDist < 0.4;
@@ -1297,19 +1299,19 @@ export class GameEngine {
           break;
         }
         case "retreat": {
-          // Move away from threat
+          // Move away from threat — full sprint to break contact.
           move.copy(dirToT).multiplyScalar(-1);
           const lat = new THREE.Vector3(-dirToT.z, 0, dirToT.x).multiplyScalar(s.flankDir * 0.4);
           move.add(lat).normalize();
-          speedMult = 1.5;
+          speedMult = 1.85;
           if (s.hp > s.hpMax * 0.3) s.state = "chase"; // recover quickly and push back
           break;
         }
         case "flank": {
-          // Move perpendicular while strongly closing
+          // Move perpendicular while strongly closing — sprint around the side.
           const perp = new THREE.Vector3(-dirToT.z, 0, dirToT.x).multiplyScalar(s.flankDir);
           move.copy(perp).addScaledVector(dirToT, 0.75).normalize();
-          speedMult = 1.5;
+          speedMult = 1.9;
           if (dist < 10 || dist > 50) s.state = hasLOS ? "attack" : "chase";
           break;
         }
@@ -1327,12 +1329,12 @@ export class GameEngine {
           move.copy(dirToT);
           const perp = new THREE.Vector3(-dirToT.z, 0, dirToT.x).multiplyScalar(s.flankDir * 0.2);
           move.add(perp).normalize();
-          speedMult = 1.55;
+          speedMult = 2.0; // full-on sprint toward the enemy
           break;
         }
         case "investigate": {
           move.copy(dirToT);
-          speedMult = 1.25;
+          speedMult = 1.55; // jog toward last-known position
           if (dist < 2) {
             s.lastSeenAt = time - 4.5;
             s.state = "patrol";
@@ -1353,7 +1355,10 @@ export class GameEngine {
         }
       }
 
-      const baseSpeed = 4.0;
+      // Raised base so engaged states (chase/flank/retreat ~1.9-2.0x) sprint at
+      // roughly the player's sprint pace (MOVE_SPEED * SPRINT_MULT ≈ 9.8) and
+      // can actually run soldiers down instead of trailing behind.
+      const baseSpeed = 5.0;
       this.steerAndMove(s, move, baseSpeed * classSpec.speedMult * speedMult, dt);
 
       // ---- 6. Shooting decision ----
@@ -1562,6 +1567,17 @@ export class GameEngine {
     const lim = WORLD_SIZE / 2 - 2;
     newPos.x = Math.max(-lim, Math.min(lim, newPos.x));
     newPos.z = Math.max(-lim, Math.min(lim, newPos.z));
+
+    // Locomotion animation: derive the actual horizontal speed achieved this
+    // frame and advance the gait phase proportionally so legs/arms swing faster
+    // when running. moveSpeedNorm: 1 ≈ walk (MOVE_SPEED), ~1.4+ ≈ sprint.
+    const actualDist = Math.hypot(newPos.x - s.pos.x, newPos.z - s.pos.z);
+    const actualSpeed = dt > 0 ? actualDist / dt : 0;
+    const norm = actualSpeed / MOVE_SPEED;
+    s.moveSpeedNorm += (norm - s.moveSpeedNorm) * Math.min(1, dt * 10);
+    // Stride frequency grows with speed (so a sprint looks like a run).
+    s.animPhase += dt * (6 + s.moveSpeedNorm * 7);
+
     s.pos.copy(newPos);
   }
 

@@ -8,16 +8,48 @@ import { store, useGame } from "@/game/store";
 import { Input } from "@/game/input";
 import { generateWorld, WORLD_SIZE, terrainHeightAt } from "@/game/world";
 import HUD from "./HUD";
-import sandTexUrl from "@/assets/desert_sand.png";
-import stoneTexUrl from "@/assets/desert_stone.png";
-import wallTexUrl from "@/assets/desert_wall.png";
-import drumWallUrl from "@/assets/drum_wall_side.png";
-import drumTopUrl from "@/assets/drum_barrel_top.png";
-import treeBarkUrl from "@/assets/tree_bark.png";
-import treeLeavesUrl from "@/assets/tree_leaves.png";
-import ammoBoxTexUrl from "@/assets/ammo_box_texture.png";
+import sandTexUrl from "@/assets/desert_sand.webp";
+import stoneTexUrl from "@/assets/desert_stone.webp";
+import wallTexUrl from "@/assets/desert_wall.webp";
+import drumWallUrl from "@/assets/drum_wall_side.webp";
+import drumTopUrl from "@/assets/drum_barrel_top.webp";
+import treeBarkUrl from "@/assets/tree_bark.webp";
+import treeLeavesUrl from "@/assets/tree_leaves.webp";
+import ammoBoxTexUrl from "@/assets/ammo_box_texture.webp";
 
 const sharedWorld = generateWorld();
+
+// All in-game textures. Kept here so they can be warmed into the browser /
+// THREE cache while the menu is on screen — by the time the player presses
+// Start, decoding is already done and the map appears almost instantly.
+const TEXTURE_URLS = [
+  sandTexUrl,
+  stoneTexUrl,
+  wallTexUrl,
+  drumWallUrl,
+  drumTopUrl,
+  treeBarkUrl,
+  treeLeavesUrl,
+  ammoBoxTexUrl,
+];
+
+let texturesWarmed = false;
+function preloadTextures() {
+  if (texturesWarmed || typeof window === "undefined") return;
+  texturesWarmed = true;
+  // Prime R3F's useLoader cache so the in-game <Suspense> resolves synchronously.
+  try {
+    (useLoader as any).preload?.(THREE.TextureLoader, TEXTURE_URLS);
+  } catch {
+    /* ignore — preload is a best-effort optimization */
+  }
+  // Also kick off the raw network fetch/decode immediately via the browser.
+  for (const url of TEXTURE_URLS) {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = url;
+  }
+}
 
 // Texture cache helper for repeated tiling
 function useTiledTexture(url: string, repeat: number, anisotropy = 8) {
@@ -949,7 +981,32 @@ function Soldiers() {
         mesh.userData.id = e.id;
         g.add(mesh);
       }
-      mesh.position.set(e.pos.x, e.pos.y - 0.9, e.pos.z);
+
+      // ---- Locomotion animation ----
+      // moveSpeedNorm: 0 idle, ~1 walk, ~1.5+ sprint. Drive a sinusoidal gait:
+      // swing legs at the hip, counter-swing the arms a touch, and add a small
+      // vertical bob whose frequency matches the (doubled) stride.
+      const anim = (mesh.userData as any).anim;
+      const spd = e.moveSpeedNorm ?? 0;
+      const phase = e.animPhase ?? 0;
+      let bob = 0;
+      if (anim) {
+        const moving = spd > 0.06;
+        // Leg swing amplitude grows with speed (bigger strides when running).
+        const legAmp = moving ? Math.min(0.95, 0.35 + spd * 0.5) : 0;
+        const swing = Math.sin(phase) * legAmp;
+        anim.legL.rotation.x = swing;
+        anim.legR.rotation.x = -swing;
+        // Subtle arm counter-swing so the upper body reads as running, not gliding.
+        const armAmp = moving ? Math.min(0.35, 0.08 + spd * 0.16) : 0;
+        anim.armL.rotation.x = anim.armLBaseX - Math.sin(phase) * armAmp;
+        anim.armR.rotation.x = anim.armRBaseX + Math.sin(phase) * armAmp;
+        // Vertical bob (twice the stride frequency since |sin| has half period).
+        bob = moving ? Math.abs(Math.sin(phase)) * Math.min(0.12, 0.04 + spd * 0.06) : 0;
+        anim.torso.position.y = anim.torsoBaseY;
+      }
+
+      mesh.position.set(e.pos.x, e.pos.y - 0.9 + bob, e.pos.z);
       mesh.rotation.y = e.yaw;
       mesh.renderOrder = 0;
       mesh.traverse((o: any) => {
@@ -997,36 +1054,34 @@ function buildSoldierMesh(team: "blue" | "red") {
   pelvis.castShadow = true;
   mesh.add(pelvis);
 
-  // ===== Legs (separated) =====
+  // ===== Legs (separated, hip-pivoted for a walk/run cycle) =====
+  // Each leg is built inside a pivot group anchored at the hip (y ≈ -1.05) so
+  // rotating the group swings the whole leg + knee + boot about the hip joint.
+  const HIP_Y = -1.05;
   const legGeo = new THREE.CylinderGeometry(0.11, 0.1, 0.7, 10);
-  const legL = new THREE.Mesh(legGeo, matUniform);
-  legL.position.set(-0.12, -1.4, 0);
-  legL.castShadow = true;
-  mesh.add(legL);
-  const legR = new THREE.Mesh(legGeo, matUniform);
-  legR.position.set(0.12, -1.4, 0);
-  legR.castShadow = true;
-  mesh.add(legR);
-
-  // Knee pads
   const kneeGeo = new THREE.SphereGeometry(0.11, 10, 8);
-  const kneeL = new THREE.Mesh(kneeGeo, matUniformDark);
-  kneeL.position.set(-0.12, -1.4, 0.06);
-  kneeL.scale.set(1, 0.5, 1);
-  mesh.add(kneeL);
-  const kneeR = kneeL.clone();
-  kneeR.position.x = 0.12;
-  mesh.add(kneeR);
-
-  // Boots
   const bootGeo = new THREE.BoxGeometry(0.16, 0.13, 0.28);
-  const bootL = new THREE.Mesh(bootGeo, matBoot);
-  bootL.position.set(-0.12, -1.82, 0.04);
-  bootL.castShadow = true;
-  mesh.add(bootL);
-  const bootR = bootL.clone();
-  bootR.position.x = 0.12;
-  mesh.add(bootR);
+
+  const makeLeg = (side: number) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(0.12 * side, HIP_Y, 0);
+    const leg = new THREE.Mesh(legGeo, matUniform);
+    leg.position.set(0, -0.35, 0); // top of the thigh at the hip pivot
+    leg.castShadow = true;
+    pivot.add(leg);
+    const knee = new THREE.Mesh(kneeGeo, matUniformDark);
+    knee.position.set(0, -0.35, 0.06);
+    knee.scale.set(1, 0.5, 1);
+    pivot.add(knee);
+    const boot = new THREE.Mesh(bootGeo, matBoot);
+    boot.position.set(0, -0.77, 0.04);
+    boot.castShadow = true;
+    pivot.add(boot);
+    mesh.add(pivot);
+    return pivot;
+  };
+  const legPivotL = makeLeg(-1);
+  const legPivotR = makeLeg(1);
 
   // ===== Torso =====
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), matUniform);
@@ -1174,6 +1229,19 @@ function buildSoldierMesh(team: "blue" | "red") {
 
   mesh.add(rifleGroup);
 
+  // Expose the parts the animation loop drives each frame, plus the resting
+  // positions it offsets from.
+  mesh.userData.anim = {
+    legL: legPivotL,
+    legR: legPivotR,
+    armL: upperL,
+    armR: upperR,
+    torso,
+    baseLegLZ: 0,
+    armLBaseX: upperL.rotation.x,
+    armRBaseX: upperR.rotation.x,
+    torsoBaseY: torso.position.y,
+  };
 
   return mesh;
 }
@@ -1608,6 +1676,8 @@ export default function Game() {
 
   useEffect(() => {
     if (!containerRef.current) return;
+    // Warm the texture cache during the menu so the first map load is instant.
+    preloadTextures();
     const input = new Input(containerRef.current);
     inputRef.current = input;
     const eng = new GameEngine(store.state, {
