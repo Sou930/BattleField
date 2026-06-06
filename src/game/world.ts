@@ -1370,3 +1370,108 @@ export function rayBox(
   }
   return tmin >= 0 ? tmin : tmax >= 0 ? tmax : null;
 }
+
+// ===================================================================
+// MAP DATA — a lightweight, render-friendly snapshot of the static
+// world geometry used to draw the minimap & the full-screen tactical
+// map. We pre-compute building footprints, road strips, hills, tree
+// clusters and named landmarks so the HUD can paint a rich map without
+// touching the heavy 3D scene graph every frame.
+// ===================================================================
+export interface MapFootprint {
+  cx: number;
+  cz: number;
+  hw: number; // half width (x)
+  hd: number; // half depth (z)
+  tall: boolean; // true for multi-storey / large structures
+}
+export interface MapStrip {
+  cx: number;
+  cz: number;
+  hw: number;
+  hd: number;
+  color: string;
+}
+export interface MapDot {
+  x: number;
+  z: number;
+  r: number;
+}
+export interface MapLandmark {
+  x: number;
+  z: number;
+  name: string;
+}
+export interface MapData {
+  worldSize: number;
+  buildings: MapFootprint[];
+  roads: MapStrip[];
+  hills: MapDot[];
+  trees: MapDot[];
+  containers: MapFootprint[];
+  landmarks: MapLandmark[];
+}
+
+let _mapDataCache: MapData | null = null;
+
+export function buildMapData(world: World): MapData {
+  if (_mapDataCache) return _mapDataCache;
+
+  const buildings: MapFootprint[] = world.buildings.map((b) => {
+    const hw = (b.max.x - b.min.x) / 2;
+    const hd = (b.max.z - b.min.z) / 2;
+    const height = b.max.y - b.min.y;
+    return {
+      cx: (b.min.x + b.max.x) / 2,
+      cz: (b.min.z + b.max.z) / 2,
+      hw,
+      hd,
+      tall: height > STOREY_HEIGHT * 2.2 || hw * hd > 120,
+    };
+  });
+
+  const roads: MapStrip[] = world.roads.map((r) => ({
+    cx: r.pos.x,
+    cz: r.pos.z,
+    hw: r.size.x / 2,
+    hd: r.size.z / 2,
+    color: r.color,
+  }));
+
+  const hills: MapDot[] = world.hills.map((h) => ({
+    x: h.pos.x,
+    z: h.pos.z,
+    r: h.radius,
+  }));
+
+  const trees: MapDot[] = world.palms.map((p) => ({
+    x: p.pos.x,
+    z: p.pos.z,
+    r: 2.5,
+  }));
+
+  const containers: MapFootprint[] = world.containers.map((c) => ({
+    cx: c.pos.x,
+    cz: c.pos.z,
+    hw: Math.max(c.size.x, c.size.z) / 2,
+    hd: Math.min(c.size.x, c.size.z) / 2,
+    tall: false,
+  }));
+
+  const landmarks: MapLandmark[] = [
+    { x: CITY_CENTER_X, z: CITY_CENTER_Z, name: "CITY" },
+    { x: AIRFIELD_CENTER_X, z: AIRFIELD_CENTER_Z, name: "AIRFIELD" },
+    { x: CITADEL_X, z: CITADEL_Z, name: "CITADEL" },
+  ];
+
+  _mapDataCache = {
+    worldSize: WORLD_SIZE,
+    buildings,
+    roads,
+    hills,
+    trees,
+    containers,
+    landmarks,
+  };
+  return _mapDataCache;
+}

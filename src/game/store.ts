@@ -58,6 +58,7 @@ export interface GameState {
   wave: number;
   loadout: Loadout;
   captureTickTimer: number;
+  mapOpen: boolean;
 }
 
 export function createInitialState(): GameState {
@@ -129,6 +130,7 @@ export function createInitialState(): GameState {
       soldierClass: "assault",
     },
     captureTickTimer: 0,
+    mapOpen: false,
   };
 }
 

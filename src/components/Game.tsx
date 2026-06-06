@@ -2082,6 +2082,8 @@ export default function Game() {
       set weaponSwitchPressed(v: number | null) { input.weaponSwitchPressed = v; },
       get vehicleGas() { return input.vehicleGas; },
       get vehicleBrake() { return input.vehicleBrake; },
+      get mapTogglePressed() { return input.mapTogglePressed; },
+      set mapTogglePressed(v: boolean) { input.mapTogglePressed = v; },
     } as any, sharedWorld);
     setEngine(eng);
   }, []);
