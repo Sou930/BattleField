@@ -8,14 +8,37 @@ import { store, useGame } from "@/game/store";
 import { Input } from "@/game/input";
 import { generateWorld, WORLD_SIZE, terrainHeightAt } from "@/game/world";
 import HUD from "./HUD";
-import sandTexUrl from "@/assets/desert_sand.webp";
-import stoneTexUrl from "@/assets/desert_stone.webp";
-import wallTexUrl from "@/assets/desert_wall.webp";
-import drumWallUrl from "@/assets/drum_wall_side.webp";
 import drumTopUrl from "@/assets/drum_barrel_top.webp";
-import treeBarkUrl from "@/assets/tree_bark.webp";
 import treeLeavesUrl from "@/assets/tree_leaves.webp";
-import ammoBoxTexUrl from "@/assets/ammo_box_texture.webp";
+
+// High-quality PBR texture sets (diffuse + normal + roughness) used to make
+// the map look far more realistic. These come from assets/new and replace /
+// augment the flat single-map textures above on objects that use
+// MeshStandardMaterial (so normal + roughness maps add real surface detail).
+// --- Ground sand (gravelly sand) ---
+import groundSandDiffUrl from "@/assets/new/gravelly_sand_diff_1k.jpg";
+// --- Cobblestone / road (gravel floor) ---
+import roadStoneDiffUrl from "@/assets/new/gravel_floor_diff_1k.jpg";
+// --- Walls (layered concrete) ---
+import wallDiffUrl from "@/assets/new/concrete_layers_02_diff_1k.jpg";
+import wallNorUrl from "@/assets/new/concrete_layers_02_nor_gl_1k.jpg";
+import wallRoughUrl from "@/assets/new/concrete_layers_02_rough_1k.jpg";
+// --- Ammo crates (wood table) ---
+import crateDiffUrl from "@/assets/new/wood_table_diff_1k.jpg";
+import crateNorUrl from "@/assets/new/wood_table_nor_gl_1k.jpg";
+import crateRoughUrl from "@/assets/new/wood_table_rough_1k.jpg";
+// --- Barrels (rusty metal) ---
+import barrelDiffUrl from "@/assets/new/rusty_metal_04_diff_1k.jpg";
+import barrelNorUrl from "@/assets/new/rusty_metal_04_nor_gl_1k.jpg";
+import barrelRoughUrl from "@/assets/new/rusty_metal_04_rough_1k.jpg";
+// --- Tree trunk (willow bark) ---
+import barkDiffUrl from "@/assets/new/bark_willow_02_diff_1k.jpg";
+import barkNorUrl from "@/assets/new/bark_willow_02_nor_gl_1k.jpg";
+import barkRoughUrl from "@/assets/new/bark_willow_02_rough_1k.jpg";
+// --- Sandbags (sandy gravel) ---
+import sandbagDiffUrl from "@/assets/new/sandy_gravel_02_diff_1k.jpg";
+import sandbagNorUrl from "@/assets/new/sandy_gravel_02_nor_gl_1k.jpg";
+import sandbagRoughUrl from "@/assets/new/sandy_gravel_02_rough_1k.jpg";
 
 const sharedWorld = generateWorld();
 
@@ -23,14 +46,26 @@ const sharedWorld = generateWorld();
 // THREE cache while the menu is on screen — by the time the player presses
 // Start, decoding is already done and the map appears almost instantly.
 const TEXTURE_URLS = [
-  sandTexUrl,
-  stoneTexUrl,
-  wallTexUrl,
-  drumWallUrl,
   drumTopUrl,
-  treeBarkUrl,
   treeLeavesUrl,
-  ammoBoxTexUrl,
+  // High-quality PBR sets from assets/new
+  groundSandDiffUrl,
+  roadStoneDiffUrl,
+  wallDiffUrl,
+  wallNorUrl,
+  wallRoughUrl,
+  crateDiffUrl,
+  crateNorUrl,
+  crateRoughUrl,
+  barrelDiffUrl,
+  barrelNorUrl,
+  barrelRoughUrl,
+  barkDiffUrl,
+  barkNorUrl,
+  barkRoughUrl,
+  sandbagDiffUrl,
+  sandbagNorUrl,
+  sandbagRoughUrl,
 ];
 
 let texturesWarmed = false;
@@ -63,6 +98,41 @@ function useTiledTexture(url: string, repeat: number, anisotropy = 8) {
     t.needsUpdate = true;
     return t;
   }, [tex, repeat, anisotropy]);
+}
+
+// PBR texture-set helper. Loads diffuse + normal + roughness maps from
+// assets/new and returns ready-to-use, tiled THREE textures. The diffuse map
+// is sRGB; normal/roughness are linear data maps. `repeatX`/`repeatY` control
+// tiling so the physical scale of the material looks right on each object.
+function useTiledPBR(
+  diffUrl: string,
+  norUrl: string,
+  roughUrl: string,
+  repeatX: number,
+  repeatY: number = repeatX,
+  anisotropy = 8,
+) {
+  const [diff, nor, rough] = useLoader(THREE.TextureLoader, [
+    diffUrl,
+    norUrl,
+    roughUrl,
+  ]) as THREE.Texture[];
+  return useMemo(() => {
+    const setup = (src: THREE.Texture, srgb: boolean) => {
+      const t = src.clone();
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(repeatX, repeatY);
+      t.anisotropy = anisotropy;
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.needsUpdate = true;
+      return t;
+    };
+    return {
+      map: setup(diff, true),
+      normalMap: setup(nor, false),
+      roughnessMap: setup(rough, false),
+    };
+  }, [diff, nor, rough, repeatX, repeatY, anisotropy]);
 }
 
 function Scene({ engine }: { engine: GameEngine }) {
@@ -221,7 +291,9 @@ function Sky() {
 }
 
 function Ground() {
-  const sandTex = useTiledTexture(sandTexUrl, 80, 16);
+  // Higher-detail gravelly-sand diffuse from assets/new for a more realistic
+  // desert floor (sampled at two scales in the shader below).
+  const sandTex = useTiledTexture(groundSandDiffUrl, 80, 16);
   const mat = useMemo(() => {
     return new THREE.ShaderMaterial({
       uniforms: {
@@ -403,7 +475,8 @@ function DustParticles() {
 }
 
 function Roads() {
-  const stoneTex = useTiledTexture(stoneTexUrl, 1, 12);
+  // Gravel-floor diffuse from assets/new — a more believable packed-stone road.
+  const stoneTex = useTiledTexture(roadStoneDiffUrl, 1, 12);
   const mat = useMemo(() => new THREE.ShaderMaterial({
     uniforms: {
       stoneTex: { value: stoneTex },
@@ -532,29 +605,28 @@ function InstancedBoxes({
     mesh.computeBoundingSphere();
   }, [items]);
 
-  const wallTex = useLoader(THREE.TextureLoader, wallTexUrl);
+  // Realistic layered-concrete PBR set (diffuse + normal + roughness) so walls
+  // have genuine surface relief and varying glossiness instead of a flat image.
+  const wallPBR = useTiledPBR(wallDiffUrl, wallNorUrl, wallRoughUrl, 2, 1, 8);
   const mat = useMemo(() => {
     if (!textured) {
       return new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide, transparent: false, depthWrite: true, depthTest: true });
     }
-    const t = wallTex.clone();
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(2, 1);
-    t.colorSpace = THREE.SRGBColorSpace;
-    t.anisotropy = 8;
-    t.needsUpdate = true;
     // Use white base color so the texture is shown at full brightness
     return new THREE.MeshStandardMaterial({
-      map: t,
+      map: wallPBR.map,
+      normalMap: wallPBR.normalMap,
+      roughnessMap: wallPBR.roughnessMap,
+      normalScale: new THREE.Vector2(0.8, 0.8),
       color: "#ffffff",
-      roughness: 0.9,
-      metalness: 0.18,
+      roughness: 1.0,
+      metalness: 0.0,
       side: THREE.DoubleSide,
       transparent: false,
       depthWrite: true,
       depthTest: true,
     });
-  }, [textured, wallTex]);
+  }, [textured, color, wallPBR]);
 
   return (
     <instancedMesh
@@ -573,7 +645,8 @@ function InstancedBoxes({
 function Crates() {
   const items = sharedWorld.crates;
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const ammoBoxTex = useTiledTexture(ammoBoxTexUrl, 1, 8);
+  // Wooden crate PBR set so ammo boxes read as real timber with grain relief.
+  const cratePBR = useTiledPBR(crateDiffUrl, crateNorUrl, crateRoughUrl, 1, 1, 8);
   useEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -594,7 +667,15 @@ function Crates() {
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, items.length]} castShadow receiveShadow>
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial map={ammoBoxTex} color="#ffffff" roughness={0.82} metalness={0.35} />
+      <meshStandardMaterial
+        map={cratePBR.map}
+        normalMap={cratePBR.normalMap}
+        roughnessMap={cratePBR.roughnessMap}
+        normalScale={new THREE.Vector2(0.7, 0.7)}
+        color="#ffffff"
+        roughness={1.0}
+        metalness={0.0}
+      />
     </instancedMesh>
   );
 }
@@ -618,23 +699,32 @@ function Barrels() {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [items]);
-  const drumWall = useTiledTexture(drumWallUrl, 1, 8);
+  // Weathered rusty-metal PBR set for the barrel walls (normal + roughness give
+  // dents, weld seams and patchy rust their proper shading), the painted-lid
+  // texture is reused for the top/bottom caps.
+  const drumPBR = useTiledPBR(barrelDiffUrl, barrelNorUrl, barrelRoughUrl, 1.4, 1, 8);
   const drumTop = useLoader(THREE.TextureLoader, drumTopUrl);
   const barrelMat = useMemo(() => {
-    const side = drumWall.clone();
-    side.wrapS = side.wrapT = THREE.RepeatWrapping;
-    side.repeat.set(1.2, 1);
-    side.colorSpace = THREE.SRGBColorSpace;
-    side.needsUpdate = true;
     const top = drumTop.clone();
     top.colorSpace = THREE.SRGBColorSpace;
     top.needsUpdate = true;
     return [
-      new THREE.MeshStandardMaterial({ map: side, color: "#ffffff", roughness: 0.62, metalness: 0.55, side: THREE.DoubleSide, transparent: false, depthWrite: true }),
+      new THREE.MeshStandardMaterial({
+        map: drumPBR.map,
+        normalMap: drumPBR.normalMap,
+        roughnessMap: drumPBR.roughnessMap,
+        normalScale: new THREE.Vector2(0.6, 0.6),
+        color: "#ffffff",
+        roughness: 1.0,
+        metalness: 0.65,
+        side: THREE.DoubleSide,
+        transparent: false,
+        depthWrite: true,
+      }),
       new THREE.MeshStandardMaterial({ map: top, color: "#ffffff", roughness: 0.58, metalness: 0.55, side: THREE.DoubleSide, transparent: false, depthWrite: true }),
       new THREE.MeshStandardMaterial({ map: top, color: "#ffffff", roughness: 0.58, metalness: 0.55, side: THREE.DoubleSide, transparent: false, depthWrite: true }),
     ];
-  }, [drumWall, drumTop]);
+  }, [drumPBR, drumTop]);
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, items.length]} castShadow receiveShadow material={barrelMat} frustumCulled={false}>
       <cylinderGeometry args={[0.35, 0.35, 1.1, 24]} />
@@ -644,14 +734,71 @@ function Barrels() {
 
 function Sandbags() {
   const items = sharedWorld.sandbags;
-  return <InstancedBoxes items={items} color="#a8895a" castShadow receiveShadow />;
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  // Sandy-gravel PBR set so sandbags have a gritty, bumpy fabric-of-sand look.
+  const bagPBR = useTiledPBR(sandbagDiffUrl, sandbagNorUrl, sandbagRoughUrl, 1, 1, 8);
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const dummy = new THREE.Object3D();
+    items.forEach((it, i) => {
+      dummy.position.copy(it.pos);
+      dummy.scale.set(it.size.x, it.size.y, it.size.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = false;
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
+  }, [items]);
+  const mat = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        map: bagPBR.map,
+        normalMap: bagPBR.normalMap,
+        roughnessMap: bagPBR.roughnessMap,
+        normalScale: new THREE.Vector2(0.9, 0.9),
+        color: "#cdb084",
+        roughness: 1.0,
+        metalness: 0.0,
+        side: THREE.DoubleSide,
+      }),
+    [bagPBR],
+  );
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, items.length]}
+      castShadow
+      receiveShadow
+      material={mat}
+      frustumCulled={false}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+    </instancedMesh>
+  );
 }
 
 function Palms() {
   // Shared geometries and materials to massively reduce draw calls
-  const barkTex = useTiledTexture(treeBarkUrl, 1.4, 12);
+  // Willow-bark PBR set gives the palm trunks deep, realistic bark relief.
+  const barkPBR = useTiledPBR(barkDiffUrl, barkNorUrl, barkRoughUrl, 1.4, 2.2, 12);
   const leavesTex = useTiledTexture(treeLeavesUrl, 1.2, 12);
-  const trunkMat = useMemo(() => new THREE.MeshStandardMaterial({ map: barkTex, color: "#ffffff", roughness: 0.95 }), [barkTex]);
+  const trunkMat = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        map: barkPBR.map,
+        normalMap: barkPBR.normalMap,
+        roughnessMap: barkPBR.roughnessMap,
+        normalScale: new THREE.Vector2(1.0, 1.0),
+        color: "#c8a878",
+        roughness: 1.0,
+        metalness: 0.0,
+      }),
+    [barkPBR],
+  );
   const coconutGeo = useMemo(() => new THREE.SphereGeometry(0.12, 6, 4), []);
   const coconutMat = useMemo(() => new THREE.MeshStandardMaterial({ color: "#3a2818", roughness: 0.8 }), []);
   const stemMat = useMemo(() => new THREE.MeshStandardMaterial({ color: "#3a5a26", roughness: 0.85 }), []);

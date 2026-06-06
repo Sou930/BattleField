@@ -23,6 +23,12 @@ export default defineConfig({
       overlay: false,
     },
   },
+  preview: {
+    host: "0.0.0.0",
+    port: 8080,
+    // Allow the sandbox proxy host to reach the preview server.
+    allowedHosts: true,
+  },
   plugins: [react()],
   resolve: {
     alias: {
