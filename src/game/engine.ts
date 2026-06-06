@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GameState, store } from "./store";
 import type { World } from "./world";
-import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt } from "./world";
+import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS } from "./world";
 import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, makeWeaponState } from "./weapons";
 import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass } from "./types";
 import { CLASSES } from "./classes";
@@ -47,6 +47,7 @@ export class GameEngine {
     vehicleBrake?: boolean;
   };
   shootHeld = false;
+  spawnPoints: { name: string; pos: THREE.Vector3 }[] = [];
   private footstepTimer = 0;
   private lastShotSound = 0;
   private lastHitSound = 0;
@@ -113,18 +114,21 @@ export class GameEngine {
       { x: 30, z: half - 35, kind: "jeep" as const },
       { x: -30, z: -half + 35, kind: "jeep" as const },
       { x: 30, z: -half + 35, kind: "jeep" as const },
+      // Tank parked inside the home base compound, facing out (north).
+      { x: BASE_POS.x, z: BASE_POS.z, kind: "tank" as const },
     ];
     let vid = 1;
     for (const sp of spawns) {
+      const isTank = sp.kind === "tank";
       this.state.vehicles.push({
         id: vid++,
-        pos: new THREE.Vector3(sp.x, 0.5, sp.z),
+        pos: new THREE.Vector3(sp.x, isTank ? 0.6 : 0.5, sp.z),
         vel: new THREE.Vector3(),
-        yaw: 0,
-        hp: 300,
-        hpMax: 300,
+        yaw: isTank ? Math.PI : 0,
+        hp: isTank ? 600 : 300,
+        hpMax: isTank ? 600 : 300,
         kind: sp.kind,
-        speed: 32,
+        speed: isTank ? 20 : 32,
         team: null,
         destroyed: false,
       });
@@ -145,8 +149,18 @@ export class GameEngine {
     this.state.weapons.grenade.reserve = lo.grenadeCount;
     this.state.weapons.smoke.reserve = lo.smokeCount;
 
-    const playerSpawn = this.findSpawnNear(0, WORLD_SIZE / 2 - 30, 30);
-    this.state.player.pos.copy(playerSpawn);
+    // Two spawn points:
+    //  1) Inner spawn: further toward the map center than the old spawn so the
+    //     player starts deeper inside the battlefield.
+    //  2) Base spawn: inside the walled home base near the expanded map's edge
+    //     (where the tank is parked).
+    this.spawnPoints = [
+      { name: "FORWARD", pos: this.findSpawnNear(0, WORLD_SIZE / 2 - 130, 25) },
+      { name: "BASE", pos: this.findSpawnNear(BASE_POS.x, BASE_POS.z, 14) },
+    ];
+    // Player starts at the home base by default.
+    const startSpawn = this.spawnPoints[1].pos;
+    this.state.player.pos.copy(startSpawn);
 
     // Init sound for everyone
     soundEngine.init();
@@ -574,7 +588,7 @@ export class GameEngine {
     // Check vehicles
     for (const v of this.state.vehicles) {
       if (v.destroyed) continue;
-      const half = v.kind === "jeep" ? new THREE.Vector3(1.2, 0.8, 2.0) : new THREE.Vector3(1.5, 1.0, 2.5);
+      const half = v.kind === "tank" ? new THREE.Vector3(1.6, 1.2, 2.6) : new THREE.Vector3(1.2, 0.8, 2.0);
       const box: Box = {
         min: new THREE.Vector3(v.pos.x - half.x, v.pos.y - half.y, v.pos.z - half.z),
         max: new THREE.Vector3(v.pos.x + half.x, v.pos.y + half.y, v.pos.z + half.z),
@@ -1355,11 +1369,15 @@ export class GameEngine {
         }
       }
 
-      // Raised base so engaged states (chase/flank/retreat ~1.9-2.0x) sprint at
-      // roughly the player's sprint pace (MOVE_SPEED * SPRINT_MULT ≈ 9.8) and
-      // can actually run soldiers down instead of trailing behind.
+      // Soldiers run at the same top speed as the player. When the AI is
+      // sprinting (engaged states such as chase/flank/retreat) its movement is
+      // capped at the player's sprint pace (MOVE_SPEED * SPRINT_MULT), so an AI
+      // running never out-paces a running player.
       const baseSpeed = 5.0;
-      this.steerAndMove(s, move, baseSpeed * classSpec.speedMult * speedMult, dt);
+      const PLAYER_SPRINT_SPEED = MOVE_SPEED * SPRINT_MULT;
+      const desiredSpeed = baseSpeed * classSpec.speedMult * speedMult;
+      const finalSpeed = Math.min(desiredSpeed, PLAYER_SPRINT_SPEED);
+      this.steerAndMove(s, move, finalSpeed, dt);
 
       // ---- 6. Shooting decision ----
       const fireInterval = s.soldierClass === "sniper" ? 1.0
