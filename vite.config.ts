@@ -36,4 +36,26 @@ export default defineConfig({
     },
     dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
   },
+  build: {
+    // Bump the warning threshold: three.js is intentionally a single large
+    // vendor chunk, which is fine because it is long-term cacheable.
+    chunkSizeWarningLimit: 900,
+    // Drop dead code / debugging statements from the production bundle to
+    // shave a little more off the shipped JS without touching behaviour.
+    target: "es2020",
+    rollupOptions: {
+      output: {
+        // Split only the heavy, self-contained three.js engine into its own
+        // long-term-cacheable chunk. React and its ecosystem are intentionally
+        // left in the main bundle: separating React internals across chunks can
+        // break module init order (e.g. `useLayoutEffect` of undefined), so we
+        // keep them together for correctness while still caching three.js apart.
+        manualChunks(id) {
+          if (id.includes("node_modules") && id.includes("/three/")) {
+            return "three";
+          }
+        },
+      },
+    },
+  },
 });

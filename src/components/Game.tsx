@@ -16,29 +16,29 @@ import treeLeavesUrl from "@/assets/tree_leaves.webp";
 // augment the flat single-map textures above on objects that use
 // MeshStandardMaterial (so normal + roughness maps add real surface detail).
 // --- Ground sand (gravelly sand) ---
-import groundSandDiffUrl from "@/assets/new/gravelly_sand_diff_1k.jpg";
+import groundSandDiffUrl from "@/assets/new/gravelly_sand_diff_1k.webp";
 // --- Cobblestone / road (gravel floor) ---
-import roadStoneDiffUrl from "@/assets/new/gravel_floor_diff_1k.jpg";
+import roadStoneDiffUrl from "@/assets/new/gravel_floor_diff_1k.webp";
 // --- Walls (layered concrete) ---
-import wallDiffUrl from "@/assets/new/concrete_layers_02_diff_1k.jpg";
-import wallNorUrl from "@/assets/new/concrete_layers_02_nor_gl_1k.jpg";
-import wallRoughUrl from "@/assets/new/concrete_layers_02_rough_1k.jpg";
+import wallDiffUrl from "@/assets/new/concrete_layers_02_diff_1k.webp";
+import wallNorUrl from "@/assets/new/concrete_layers_02_nor_gl_1k.webp";
+import wallRoughUrl from "@/assets/new/concrete_layers_02_rough_1k.webp";
 // --- Ammo crates (wood table) ---
-import crateDiffUrl from "@/assets/new/wood_table_diff_1k.jpg";
-import crateNorUrl from "@/assets/new/wood_table_nor_gl_1k.jpg";
-import crateRoughUrl from "@/assets/new/wood_table_rough_1k.jpg";
+import crateDiffUrl from "@/assets/new/wood_table_diff_1k.webp";
+import crateNorUrl from "@/assets/new/wood_table_nor_gl_1k.webp";
+import crateRoughUrl from "@/assets/new/wood_table_rough_1k.webp";
 // --- Barrels (rusty metal) ---
-import barrelDiffUrl from "@/assets/new/rusty_metal_04_diff_1k.jpg";
-import barrelNorUrl from "@/assets/new/rusty_metal_04_nor_gl_1k.jpg";
-import barrelRoughUrl from "@/assets/new/rusty_metal_04_rough_1k.jpg";
+import barrelDiffUrl from "@/assets/new/rusty_metal_04_diff_1k.webp";
+import barrelNorUrl from "@/assets/new/rusty_metal_04_nor_gl_1k.webp";
+import barrelRoughUrl from "@/assets/new/rusty_metal_04_rough_1k.webp";
 // --- Tree trunk (willow bark) ---
-import barkDiffUrl from "@/assets/new/bark_willow_02_diff_1k.jpg";
-import barkNorUrl from "@/assets/new/bark_willow_02_nor_gl_1k.jpg";
-import barkRoughUrl from "@/assets/new/bark_willow_02_rough_1k.jpg";
+import barkDiffUrl from "@/assets/new/bark_willow_02_diff_1k.webp";
+import barkNorUrl from "@/assets/new/bark_willow_02_nor_gl_1k.webp";
+import barkRoughUrl from "@/assets/new/bark_willow_02_rough_1k.webp";
 // --- Sandbags (sandy gravel) ---
-import sandbagDiffUrl from "@/assets/new/sandy_gravel_02_diff_1k.jpg";
-import sandbagNorUrl from "@/assets/new/sandy_gravel_02_nor_gl_1k.jpg";
-import sandbagRoughUrl from "@/assets/new/sandy_gravel_02_rough_1k.jpg";
+import sandbagDiffUrl from "@/assets/new/sandy_gravel_02_diff_1k.webp";
+import sandbagNorUrl from "@/assets/new/sandy_gravel_02_nor_gl_1k.webp";
+import sandbagRoughUrl from "@/assets/new/sandy_gravel_02_rough_1k.webp";
 
 const sharedWorld = generateWorld();
 
@@ -87,13 +87,19 @@ function preloadTextures() {
 }
 
 // Texture cache helper for repeated tiling
-function useTiledTexture(url: string, repeat: number, anisotropy = 8) {
+function useTiledTexture(url: string, repeat: number, anisotropy = 16) {
   const tex = useLoader(THREE.TextureLoader, url);
   return useMemo(() => {
     const t = tex.clone();
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(repeat, repeat);
+    // High anisotropy keeps tiled ground/road sharp at grazing angles — this
+    // recovers most of the perceived detail lost by down-scaling the maps,
+    // for free on the GPU.
     t.anisotropy = anisotropy;
+    t.generateMipmaps = true;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.magFilter = THREE.LinearFilter;
     t.colorSpace = THREE.SRGBColorSpace;
     t.needsUpdate = true;
     return t;
@@ -110,7 +116,7 @@ function useTiledPBR(
   roughUrl: string,
   repeatX: number,
   repeatY: number = repeatX,
-  anisotropy = 8,
+  anisotropy = 16,
 ) {
   const [diff, nor, rough] = useLoader(THREE.TextureLoader, [
     diffUrl,
@@ -122,7 +128,13 @@ function useTiledPBR(
       const t = src.clone();
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.repeat.set(repeatX, repeatY);
+      // Anisotropic filtering + trilinear mipmaps keep surfaces crisp at steep
+      // viewing angles and free of shimmer, compensating for the smaller
+      // (half-res) normal/roughness maps we now ship.
       t.anisotropy = anisotropy;
+      t.generateMipmaps = true;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
       t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
       t.needsUpdate = true;
       return t;
@@ -164,21 +176,25 @@ function Scene({ engine }: { engine: GameEngine }) {
   return (
     <>
       <fog attach="fog" args={["#efd29a", 120, 760]} />
-      <hemisphereLight args={["#dbeeff", "#d0a05f", 1.15]} />
+      {/* Sky/ground hemisphere fill: cool sky blue from above, warm sand bounce
+          from below — gives natural ambient occlusion-like shading on people,
+          trees and façades without extra render cost. */}
+      <hemisphereLight args={["#cfe6ff", "#ca996a", 1.05]} />
       <directionalLight
         position={[80, 160, 40]}
         intensity={2.8}
         color="#fff1cf"
         castShadow
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
         shadow-camera-left={-180}
         shadow-camera-right={180}
         shadow-camera-top={180}
         shadow-camera-bottom={-180}
         shadow-camera-near={1}
         shadow-camera-far={400}
-        shadow-bias={-0.0003}
+        shadow-bias={-0.00018}
+        shadow-normalBias={0.02}
       />
       <directionalLight
         position={[-40, 80, -60]}
@@ -617,7 +633,7 @@ function InstancedBoxes({
       map: wallPBR.map,
       normalMap: wallPBR.normalMap,
       roughnessMap: wallPBR.roughnessMap,
-      normalScale: new THREE.Vector2(0.8, 0.8),
+      normalScale: new THREE.Vector2(1.05, 1.05),
       color: "#ffffff",
       roughness: 1.0,
       metalness: 0.0,
@@ -671,7 +687,7 @@ function Crates() {
         map={cratePBR.map}
         normalMap={cratePBR.normalMap}
         roughnessMap={cratePBR.roughnessMap}
-        normalScale={new THREE.Vector2(0.7, 0.7)}
+        normalScale={new THREE.Vector2(0.95, 0.95)}
         color="#ffffff"
         roughness={1.0}
         metalness={0.0}
@@ -1181,18 +1197,22 @@ function buildSoldierMesh(team: "blue" | "red") {
   const boot = "#1a1410";
   const glove = "#2a1f18";
 
-  const matSkin = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.85 });
-  const matUniform = new THREE.MeshStandardMaterial({ color: uniform, roughness: 0.9 });
-  const matUniformDark = new THREE.MeshStandardMaterial({ color: uniformDark, roughness: 0.95 });
-  const matBoot = new THREE.MeshStandardMaterial({ color: boot, roughness: 0.8 });
-  const matGlove = new THREE.MeshStandardMaterial({ color: glove, roughness: 0.9 });
+  // Slightly tuned PBR values give skin a soft sheen, cloth a matte look and
+  // gear a believable hard-surface response — more lifelike soldiers at no
+  // geometry/texture cost.
+  const matSkin = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.62, metalness: 0.0 });
+  const matUniform = new THREE.MeshStandardMaterial({ color: uniform, roughness: 0.92 });
+  const matUniformDark = new THREE.MeshStandardMaterial({ color: uniformDark, roughness: 0.96 });
+  const matBoot = new THREE.MeshStandardMaterial({ color: boot, roughness: 0.55, metalness: 0.1 });
+  const matGlove = new THREE.MeshStandardMaterial({ color: glove, roughness: 0.88 });
   const matVest = new THREE.MeshStandardMaterial({
     color: accent,
-    roughness: 0.55,
+    roughness: 0.5,
+    metalness: 0.15,
     emissive: accentEm,
     emissiveIntensity: 0.35,
   });
-  const matHelm = new THREE.MeshStandardMaterial({ color: helmetCol, roughness: 0.5 });
+  const matHelm = new THREE.MeshStandardMaterial({ color: helmetCol, roughness: 0.42, metalness: 0.2 });
   const matMetal = new THREE.MeshStandardMaterial({ color: "#15151a", metalness: 0.6, roughness: 0.4 });
 
   // ===== Hips/Pelvis =====
@@ -1884,12 +1904,17 @@ export default function Game() {
               powerPreference: "high-performance",
               logarithmicDepthBuffer: false,
             }}
-            dpr={[0.9, 1.25]}
+            // Adaptive resolution: clamp to the device pixel ratio but allow a
+            // slightly crisper image (up to 1.5x) on capable displays while
+            // keeping the lower bound for weak GPUs — quality up, cost bounded.
+            dpr={[0.9, Math.min(typeof window !== "undefined" ? window.devicePixelRatio : 1, 1.5)]}
             onCreated={({ scene, gl }) => {
               scene.background = new THREE.Color("#87ceeb");
               gl.toneMapping = THREE.ACESFilmicToneMapping;
               gl.toneMappingExposure = 1.35;
+              gl.outputColorSpace = THREE.SRGBColorSpace;
               gl.shadowMap.enabled = true;
+              // Soft, slightly higher-quality shadow filtering.
               gl.shadowMap.type = THREE.PCFSoftShadowMap;
             }}
           >
