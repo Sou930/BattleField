@@ -230,7 +230,6 @@ function Scene({ engine }: { engine: GameEngine }) {
       <BulletTrails />
       <MuzzleFlashes />
       <VehiclesScene />
-      <ParkedVehiclesScene />
       <ViewModel />
     </>
   );
@@ -1811,19 +1810,7 @@ function buildTankMesh(mesh: THREE.Group) {
   mesh.add(hatch);
 }
 
-// --- Static (parked, non-drivable) military vehicles for the motor pool ----
-function buildParkedTank(mesh: THREE.Group, color: string) {
-  const hullMat = new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.15 });
-  const darkMat = new THREE.MeshStandardMaterial({ color: '#2a2a26', roughness: 0.95 });
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.0, 5.4), hullMat); hull.position.y = 0.8; hull.castShadow = true; mesh.add(hull);
-  const deck = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.5, 3.8), hullMat); deck.position.y = 1.45; deck.castShadow = true; mesh.add(deck);
-  for (const tx of [-1.55, 1.55]) {
-    const track = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.8, 5.6), darkMat); track.position.set(tx, 0.5, 0); track.castShadow = true; mesh.add(track);
-  }
-  const turret = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.25, 0.75, 12), hullMat); turret.position.set(0, 2.0, -0.2); turret.castShadow = true; mesh.add(turret);
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.19, 3.8, 12), darkMat); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 2.05, -2.2); barrel.castShadow = true; mesh.add(barrel);
-}
-
+// --- Military vehicle body builders (shared by the drivable motor pool) -----
 function buildApc(mesh: THREE.Group, color: string) {
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.2 });
   const darkMat = new THREE.MeshStandardMaterial({ color: '#1c1c1a', roughness: 0.95 });
@@ -1859,27 +1846,6 @@ function buildHumvee(mesh: THREE.Group, color: string) {
   for (const [wx, wz] of [[-1.2, 1.5], [1.2, 1.5], [-1.2, -1.5], [1.2, -1.5]]) {
     const w = new THREE.Mesh(wheelGeo, darkMat); w.rotation.z = Math.PI / 2; w.position.set(wx, 0.55, wz); mesh.add(w);
   }
-}
-
-function ParkedVehiclesScene() {
-  const ref = useRef<THREE.Group>(null);
-  const built = useRef(false);
-  useEffect(() => {
-    const g = ref.current;
-    if (!g || built.current) return;
-    built.current = true;
-    for (const pv of sharedWorld.parkedVehicles) {
-      const m = new THREE.Group();
-      if (pv.kind === "tank") buildParkedTank(m, pv.color);
-      else if (pv.kind === "apc") buildApc(m, pv.color);
-      else if (pv.kind === "truck") buildTruck(m, pv.color);
-      else buildHumvee(m, pv.color);
-      m.position.copy(pv.pos);
-      m.rotation.y = pv.yaw;
-      g.add(m);
-    }
-  }, []);
-  return <group ref={ref} />;
 }
 
 function Containers() {
@@ -1938,6 +1904,12 @@ function VehiclesScene() {
         mesh.userData.id = v.id;
         if (v.kind === 'tank') {
           buildTankMesh(mesh);
+        } else if (v.kind === 'apc') {
+          buildApc(mesh, '#6f6a4a');
+        } else if (v.kind === 'truck') {
+          buildTruck(mesh, '#7c7355');
+        } else if (v.kind === 'humvee') {
+          buildHumvee(mesh, '#857a58');
         } else {
           buildJeepMesh(mesh);
         }

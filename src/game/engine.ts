@@ -108,34 +108,62 @@ export class GameEngine {
     }));
   }
 
+  // Per-kind drivable vehicle tuning (hp + top speed).
+  private static VEHICLE_STATS: Record<Vehicle["kind"], { hp: number; speed: number }> = {
+    jeep: { hp: 300, speed: 32 },
+    humvee: { hp: 360, speed: 30 },
+    truck: { hp: 420, speed: 24 },
+    apc: { hp: 520, speed: 22 },
+    tank: { hp: 600, speed: 20 },
+  };
+
   private spawnVehicles() {
     const half = WORLD_SIZE / 2;
-    const spawns = [
-      // Drivable jeeps just outside the base gate and forward in the field.
-      { x: -14, z: BASE_POS.z - 40, kind: "jeep" as const },
-      { x: 14, z: BASE_POS.z - 40, kind: "jeep" as const },
-      { x: -30, z: -half + 35, kind: "jeep" as const },
-      { x: 30, z: -half + 35, kind: "jeep" as const },
-      // A drivable tank staged just outside the base gate, facing out (north)
-      // so the player can climb in and drive straight onto the battlefield.
-      { x: 0, z: BASE_POS.z - 100, kind: "tank" as const },
-    ];
     let vid = 1;
-    for (const sp of spawns) {
-      const isTank = sp.kind === "tank";
+    const stats = GameEngine.VEHICLE_STATS;
+
+    const pushVehicle = (
+      kind: Vehicle["kind"],
+      x: number,
+      z: number,
+      yaw: number,
+    ) => {
+      const st = stats[kind];
+      const y = terrainHeightAt(this.world, x, z) + (kind === "tank" ? 0.6 : 0.5);
       this.state.vehicles.push({
         id: vid++,
-        pos: new THREE.Vector3(sp.x, isTank ? 0.6 : 0.5, sp.z),
+        pos: new THREE.Vector3(x, y, z),
         vel: new THREE.Vector3(),
-        yaw: isTank ? Math.PI : 0,
-        hp: isTank ? 600 : 300,
-        hpMax: isTank ? 600 : 300,
-        kind: sp.kind,
-        speed: isTank ? 20 : 32,
+        yaw,
+        hp: st.hp,
+        hpMax: st.hp,
+        kind,
+        speed: st.speed,
         team: null,
         destroyed: false,
       });
+    };
+
+    // Drivable jeeps just outside the base gate and forward in the field, plus
+    // a tank staged outside the gate facing the battlefield.
+    pushVehicle("jeep", -14, BASE_POS.z - 40, 0);
+    pushVehicle("jeep", 14, BASE_POS.z - 40, 0);
+    pushVehicle("jeep", -30, -half + 35, 0);
+    pushVehicle("jeep", 30, -half + 35, 0);
+    pushVehicle("tank", 0, BASE_POS.z - 100, Math.PI);
+
+    // Every vehicle in the base motor pool is now drivable: convert each parked
+    // vehicle into a real, enterable vehicle (and stop drawing the static prop
+    // for it so we don't render two overlapping models).
+    for (const pv of this.world.parkedVehicles) {
+      pushVehicle(pv.kind, pv.pos.x, pv.pos.z, pv.yaw);
     }
+    // The motor-pool props are now represented by live vehicles, so clear the
+    // decorative list to avoid double geometry / double colliders, then rebuild
+    // the static collision boxes so the now-removed parked-vehicle colliders no
+    // longer block the drivable vehicles that replaced them.
+    this.world.parkedVehicles.length = 0;
+    this.boxes = worldToBoxes(this.world);
   }
 
   startMatch() {
@@ -393,7 +421,9 @@ export class GameEngine {
       const v = this.state.vehicles.find(v => v.id === this.state.playerInVehicle);
       if (v) {
         v.team = null;
-        this.state.player.pos.set(v.pos.x + 3, EYE_HEIGHT, v.pos.z);
+        const ex = v.pos.x + 3;
+        const ez = v.pos.z;
+        this.state.player.pos.set(ex, terrainHeightAt(this.world, ex, ez) + EYE_HEIGHT, ez);
       }
       this.state.playerInVehicle = null;
       soundEngine.playVehicleEnter();
@@ -507,14 +537,24 @@ export class GameEngine {
     }
     this.state.nearbyPickupId = nearest ? nearest.id : null;
 
-    // Nearby vehicle
+    // Nearby vehicle. The enter range is widened by the vehicle's footprint so
+    // big hulls (tanks/trucks/APCs) can be boarded by standing next to them,
+    // not just dead-centre on them.
     let nearVehicle: Vehicle | null = null;
-    let minVD = VEHICLE_ENTER_RANGE;
+    let bestScore = Infinity;
     for (const v of this.state.vehicles) {
       if (v.destroyed) continue;
+      const reach = v.kind === "tank" ? 4.5
+        : v.kind === "truck" ? 4.5
+        : v.kind === "apc" ? 4.2
+        : v.kind === "humvee" ? 3.8
+        : VEHICLE_ENTER_RANGE;
       const d = Math.hypot(v.pos.x - pp.x, v.pos.z - pp.z);
-      if (d < minVD) {
-        minVD = d;
+      // Compare distance relative to each vehicle's reach so the closest
+      // *boardable* vehicle wins regardless of size.
+      const score = d - reach;
+      if (d < reach && score < bestScore) {
+        bestScore = score;
         nearVehicle = v;
       }
     }
@@ -607,7 +647,11 @@ export class GameEngine {
     // Check vehicles
     for (const v of this.state.vehicles) {
       if (v.destroyed) continue;
-      const half = v.kind === "tank" ? new THREE.Vector3(1.6, 1.2, 2.6) : new THREE.Vector3(1.2, 0.8, 2.0);
+      const half = v.kind === "tank" ? new THREE.Vector3(1.6, 1.2, 2.6)
+        : v.kind === "apc" ? new THREE.Vector3(1.5, 1.4, 2.8)
+        : v.kind === "truck" ? new THREE.Vector3(1.4, 1.6, 3.4)
+        : v.kind === "humvee" ? new THREE.Vector3(1.3, 1.1, 2.3)
+        : new THREE.Vector3(1.2, 0.8, 2.0);
       const box: Box = {
         min: new THREE.Vector3(v.pos.x - half.x, v.pos.y - half.y, v.pos.z - half.z),
         max: new THREE.Vector3(v.pos.x + half.x, v.pos.y + half.y, v.pos.z + half.z),
@@ -933,10 +977,16 @@ export class GameEngine {
     const lim = WORLD_SIZE / 2 - 5;
     v.pos.x = Math.max(-lim, Math.min(lim, v.pos.x));
     v.pos.z = Math.max(-lim, Math.min(lim, v.pos.z));
-    v.pos.y = terrainHeightAt(this.world, v.pos.x, v.pos.z) + 0.5;
+    v.pos.y = terrainHeightAt(this.world, v.pos.x, v.pos.z) + (v.kind === "tank" ? 0.6 : 0.5);
 
-    // Player rides vehicle
-    p.pos.set(v.pos.x, v.pos.y + 1.8, v.pos.z);
+    // Player rides vehicle — seat height varies with the hull size so the
+    // camera sits in the cab/turret rather than buried inside or floating above.
+    const seatH = v.kind === "tank" ? 2.4
+      : v.kind === "apc" ? 2.6
+      : v.kind === "truck" ? 2.4
+      : v.kind === "humvee" ? 2.0
+      : 1.8;
+    p.pos.set(v.pos.x, v.pos.y + seatH, v.pos.z);
     p.vel.set(0, 0, 0);
     p.onGround = true;
   }
