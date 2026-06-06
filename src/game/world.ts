@@ -82,7 +82,8 @@ export const DISTRICT_SEAM_X = 0;
 // this disc the ground is flattened so streets and buildings sit level.
 export const CITY_CENTER_X = WORLD_SIZE * 0.24;
 export const CITY_CENTER_Z = -WORLD_SIZE * 0.04;
-const CITY_FLAT_RADIUS = WORLD_SIZE * 0.2 + 18;
+// Slightly larger flattened urban disc so the denser grid stays buildable.
+const CITY_FLAT_RADIUS = WORLD_SIZE * 0.23 + 18;
 
 // --- Aleppo Citadel (landmark hill-fortress on the city's NE) ------------
 export const CITADEL_X = WORLD_SIZE * 0.34;
@@ -617,36 +618,73 @@ export function generateWorld(): World {
   // plaza around the central fountain, and the Citadel landmark on a hill.
   const cityCX = CITY_CENTER_X;
   const cityCZ = CITY_CENTER_Z;
-  const citySize = WORLD_SIZE * 0.42;
-  const cityRadius = CITY_FLAT_RADIUS - 10;
-  // Denser city grid: more (smaller) cells packs many more buildings into the
-  // same footprint, with narrower streets between them.
-  const cells = 18;
+  const citySize = WORLD_SIZE * 0.46;
+  const cityRadius = CITY_FLAT_RADIUS - 8;
+  // Denser grid: more, smaller blocks separated by narrow alleys, like a real
+  // medieval old-city quarter.
+  const cells = 20;
   const cellSize = citySize / cells;
   const plazaX = cityCX;
   const plazaZ = cityCZ;
+  // A narrow alley gap kept between adjacent building footprints so the dense
+  // grid still has walkable streets.
+  const alley = 1.6;
   for (let gx = 0; gx < cells; gx++) {
     for (let gz = 0; gz < cells; gz++) {
       const cx0 = cityCX - citySize / 2 + (gx + 0.5) * cellSize;
       const cz0 = cityCZ - citySize / 2 + (gz + 0.5) * cellSize;
       const dPlaza = Math.hypot(cx0 - plazaX, cz0 - plazaZ);
-      if (dPlaza < cellSize * 1.2) continue; // keep market plaza clear
+      if (dPlaza < cellSize * 1.6) continue; // keep market plaza clear
       if (Math.hypot(cx0 - cityCX, cz0 - cityCZ) > cityRadius) continue;
       // Leave the Citadel hill clear of ordinary houses.
       if (Math.hypot(cx0 - CITADEL_X, cz0 - CITADEL_Z) < CITADEL_RADIUS * 0.8) continue;
-      if (rng() < 0.10) continue; // fewer empty lots -> denser blocks
-      const w = 8 + rng() * 12;
-      const d = 8 + rng() * 12;
-      const tower = rng() < 0.26;
-      const h = tower ? STOREY_HEIGHT * (3.5 + rng() * 2.5) : STOREY_HEIGHT * (1 + rng() * 2.6);
-      const b = makeBuilding(rng, cx0 + (rng() - 0.5) * 2.5, cz0 + (rng() - 0.5) * 2.5, w, d, h);
-      buildings.push(b);
-      // War damage: pile rubble crates against ~55% of buildings.
-      if (rng() < 0.55) {
-        for (let r = 0; r < 2 + Math.floor(rng() * 4); r++) {
-          const rx = b.min.x + rng() * (b.max.x - b.min.x);
-          const rz = b.max.z + 0.6 + rng() * 1.5;
-          crates.push({ pos: new THREE.Vector3(rx, 0.5, rz), size: 0.7 + rng() * 0.9, color: "#6b6256" });
+      // Keep the main cross-streets (every grid line through the center) clear
+      // so the city reads as blocks divided by roads rather than a solid mass.
+      const onMainStreetX = Math.abs(cx0 - cityCX) < cellSize * 0.5;
+      const onMainStreetZ = Math.abs(cz0 - cityCZ) < cellSize * 0.5;
+      if (onMainStreetX || onMainStreetZ) continue;
+
+      if (rng() < 0.07) continue; // occasional alley / rubble lot (much denser now)
+
+      // How much of the cell the footprint fills (densely packed: most of it,
+      // minus a slim alley). Buildings sit flush to the block so the streets
+      // become genuine narrow corridors.
+      const maxW = cellSize - alley;
+      const maxD = cellSize - alley;
+
+      // ~28% of lots get split into 2–3 adjacent row-houses sharing party
+      // walls (typical dense souk / residential terrace).
+      const rowHouse = rng() < 0.28 && maxW > 9;
+      if (rowHouse) {
+        const n = 2 + (rng() < 0.4 ? 1 : 0);
+        const segW = (maxW - (n - 1) * 0.3) / n;
+        for (let s = 0; s < n; s++) {
+          const sx = cx0 - maxW / 2 + segW / 2 + s * (segW + 0.3);
+          const sd = Math.min(maxD, 7 + rng() * (maxD - 7));
+          const tower = rng() < 0.18;
+          const h = tower
+            ? STOREY_HEIGHT * (3.5 + rng() * 2.0)
+            : STOREY_HEIGHT * (2 + rng() * 2.2);
+          const b = makeBuilding(rng, sx, cz0, segW, sd, h);
+          buildings.push(b);
+        }
+      } else {
+        const w = Math.min(maxW, 8 + rng() * (maxW - 8));
+        const d = Math.min(maxD, 8 + rng() * (maxD - 8));
+        // More tall towers (~30%) for a denser, taller skyline.
+        const tower = rng() < 0.3;
+        const h = tower
+          ? STOREY_HEIGHT * (3.5 + rng() * 2.5)
+          : STOREY_HEIGHT * (1 + rng() * 2.6);
+        const b = makeBuilding(rng, cx0 + (rng() - 0.5) * 1.5, cz0 + (rng() - 0.5) * 1.5, w, d, h);
+        buildings.push(b);
+        // War damage: pile rubble crates against ~55% of buildings.
+        if (rng() < 0.55) {
+          for (let r = 0; r < 2 + Math.floor(rng() * 4); r++) {
+            const rx = b.min.x + rng() * (b.max.x - b.min.x);
+            const rz = b.max.z + 0.6 + rng() * 1.5;
+            crates.push({ pos: new THREE.Vector3(rx, 0.5, rz), size: 0.7 + rng() * 0.9, color: "#6b6256" });
+          }
         }
       }
     }
@@ -711,7 +749,7 @@ export function generateWorld(): World {
   // Wooden crates as cover, concentrated in the city, sparse in the desert.
   for (let i = 0; i < 340; i++) {
     const s = 0.9 + rng() * 0.7;
-    const inCity = rng() > 0.4;
+    const inCity = rng() > 0.3;
     let px: number, pz: number;
     if (inCity) {
       px = cityCX + (rng() - 0.5) * citySize;
@@ -789,27 +827,35 @@ export function generateWorld(): World {
   const roadColor = "#6f5b3c";
   roads.push({ pos: new THREE.Vector3(cityCX, 0.01, cityCZ), size: new THREE.Vector3(citySize, 0.02, 7), color: roadColor });
   roads.push({ pos: new THREE.Vector3(cityCX, 0.01, cityCZ), size: new THREE.Vector3(7, 0.02, citySize), color: roadColor });
-  for (let i = -3; i <= 3; i++) {
+  // A finer mesh of secondary streets / alleys matching the denser grid, so
+  // the packed blocks are separated by genuine walkable lanes.
+  const halfCells = Math.floor(cells / 2);
+  for (let i = -halfCells; i <= halfCells; i++) {
     if (i === 0) continue;
-    roads.push({ pos: new THREE.Vector3(cityCX, 0.01, cityCZ + i * cellSize), size: new THREE.Vector3(citySize, 0.02, 3), color: "#7a6444" });
-    roads.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0.01, cityCZ), size: new THREE.Vector3(3, 0.02, citySize), color: "#7a6444" });
+    const minor = Math.abs(i) % 2 === 0;
+    const lane = minor ? 3.2 : 2.0;
+    const laneColor = minor ? "#7a6444" : "#6a553a";
+    roads.push({ pos: new THREE.Vector3(cityCX, 0.01, cityCZ + i * cellSize), size: new THREE.Vector3(citySize, 0.02, lane), color: laneColor });
+    roads.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0.01, cityCZ), size: new THREE.Vector3(lane, 0.02, citySize), color: laneColor });
   }
   // A long approach road linking the airfield apron to the city.
   roads.push({ pos: new THREE.Vector3((apronX + cityCX) / 2, 0.01, 0), size: new THREE.Vector3(cityCX - apronX, 0.02, 9), color: "#5a4d34" });
 
-  // Market tents around the central fountain plaza.
-  const tentColors = ["#b04030", "#3060a0", "#a08030", "#6a4030"];
-  for (let i = 0; i < 18; i++) {
-    const a = (i / 18) * Math.PI * 2;
-    const r = 22 + (i % 3) * 4;
+  // Market tents — two denser rings around the central fountain plaza,
+  // forming a busy souk.
+  const tentColors = ["#b04030", "#3060a0", "#a08030", "#6a4030", "#8a6020", "#406a40"];
+  for (let i = 0; i < 34; i++) {
+    const a = (i / 34) * Math.PI * 2 + (i % 2) * 0.09;
+    const r = 18 + (i % 4) * 5;
     const tx = plazaX + Math.cos(a) * r;
     const tz = plazaZ + Math.sin(a) * r;
-    if (insideAnyBuilding(new THREE.Vector3(tx, 0, tz), buildings, 1.5)) continue;
+    if (insideAnyBuilding(new THREE.Vector3(tx, 0, tz), buildings, 1.2)) continue;
     tents.push({ pos: new THREE.Vector3(tx, 0, tz), color: tentColors[Math.floor(rng() * tentColors.length)] });
   }
 
-  // Street lamps along the city's main roads.
-  for (let i = -5; i <= 5; i++) {
+  // Street lamps along the city's main roads (now reaching further out to line
+  // the denser grid).
+  for (let i = -8; i <= 8; i++) {
     if (i === 0) continue;
     lamps.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0, cityCZ + 4) });
     lamps.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0, cityCZ - 4) });

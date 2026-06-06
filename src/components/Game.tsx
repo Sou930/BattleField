@@ -1011,6 +1011,54 @@ function Awnings() {
   );
 }
 
+// Helper: instanced window glass/frame panes. With the much denser city this
+// now renders tens of thousands of windows, so each layer (lit glass, dark
+// glass, frame) is a single InstancedMesh instead of thousands of meshes.
+function InstancedWindowPanes({
+  items,
+  material,
+  inset,
+  depthScale,
+}: {
+  items: typeof sharedWorld.windows;
+  material: THREE.Material;
+  inset: number; // scale factor applied to the pane (1 = full frame size)
+  depthScale?: number; // z scale factor (glass slightly proud to avoid z-fight)
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const dummy = new THREE.Object3D();
+    const dz = depthScale ?? 1;
+    items.forEach((w, i) => {
+      dummy.position.copy(w.pos);
+      dummy.scale.set(
+        w.size.x * inset,
+        w.size.y * inset,
+        Math.max(w.size.z, 0.04) * dz,
+      );
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = false;
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
+  }, [items, inset, depthScale]);
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, Math.max(items.length, 1)]}
+      material={material}
+      frustumCulled={false}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+    </instancedMesh>
+  );
+}
+
 function Windows() {
   // Two materials: lit (emissive warm) and dark glass
   const litMat = useMemo(
@@ -1038,28 +1086,23 @@ function Windows() {
     () => new THREE.MeshStandardMaterial({ color: "#3a2818", roughness: 0.8 }),
     [],
   );
+
+  // Split windows into lit / dark so each glass colour is one instanced draw.
+  const { lit, dark } = useMemo(() => {
+    const lit: typeof sharedWorld.windows = [];
+    const dark: typeof sharedWorld.windows = [];
+    for (const w of sharedWorld.windows) (w.lit ? lit : dark).push(w);
+    return { lit, dark };
+  }, []);
+
   return (
     <group>
-      {sharedWorld.windows.map((w, i) => (
-        <group key={i} position={w.pos.toArray()}>
-          {/* glass */}
-          <mesh material={w.lit ? litMat : darkMat}>
-            <boxGeometry args={[w.size.x * 0.85, w.size.y * 0.85, Math.max(w.size.z, 0.04)]} />
-          </mesh>
-          {/* frame */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[w.size.x, w.size.y, Math.max(w.size.z, 0.04) * 0.9]} />
-          </mesh>
-          {/* horizontal mullion */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[w.size.x * 0.95, 0.04, Math.max(w.size.z, 0.04) * 1.05]} />
-          </mesh>
-          {/* vertical mullion */}
-          <mesh material={frameMat}>
-            <boxGeometry args={[0.04, w.size.y * 0.95, Math.max(w.size.z, 0.04) * 1.05]} />
-          </mesh>
-        </group>
-      ))}
+      {/* Window frames (one draw call for every window). */}
+      <InstancedWindowPanes items={sharedWorld.windows} material={frameMat} inset={1} />
+      {/* Lit glass panes (inset inside the frame, slightly proud to avoid z-fight). */}
+      <InstancedWindowPanes items={lit} material={litMat} inset={0.82} depthScale={1.4} />
+      {/* Dark glass panes. */}
+      <InstancedWindowPanes items={dark} material={darkMat} inset={0.82} depthScale={1.4} />
     </group>
   );
 }
