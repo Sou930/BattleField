@@ -38,6 +38,7 @@ const AIRCRAFT_HP_FIGHTER    = 180;
 const AIRCRAFT_HP_ATTACKER   = 240;
 const AIRCRAFT_RESPAWN_DELAY = 10;    // 着陸後の再出撃までの秒数
 const AIRCRAFT_GUN_RELOAD    = 3;     // 弾切れ後の補充までの秒数
+const AIRCRAFT_ENTER_RANGE   = 8.0;   // プレイヤーが搭乗できる水平距離
 
 // Reusable temp vectors to reduce allocations in hot paths
 const _tmpV1 = new THREE.Vector3();
@@ -59,6 +60,7 @@ export class GameEngine {
     pickupPressed?: boolean;
     weaponSwitchPressed?: number | null;
     enterVehiclePressed?: boolean;
+    aircraftEnterPressed?: boolean;
     vehicleGas?: boolean;
     vehicleBrake?: boolean;
     mapTogglePressed?: boolean;
@@ -407,7 +409,9 @@ export class GameEngine {
     if (this.state.status !== "playing") return;
 
     this.handleInput(dt, time);
-    if (this.state.playerInVehicle) {
+    if (this.state.playerInAircraft) {
+      this.updatePlayerAircraft(dt, time);
+    } else if (this.state.playerInVehicle) {
       this.updatePlayerVehicle(dt);
     } else {
       this.updatePlayer(dt);
@@ -470,6 +474,17 @@ export class GameEngine {
   private handleInput(dt: number, time: number) {
     const p = this.state.player;
     const w = this.state.weapons[this.state.currentWeapon];
+
+    // Aircraft enter/exit with G (handled first so it works in every mode).
+    if (this.input.keys.has("KeyG") || this.input.aircraftEnterPressed) {
+      this.tryEnterExitAircraft();
+      this.input.aircraftEnterPressed = false;
+      this.input.keys.delete("KeyG"); // consume
+    }
+
+    // While piloting an aircraft, the flight controller (updatePlayerAircraft)
+    // owns the mouse delta + weapon firing, so skip the on-foot FPS handling.
+    if (this.state.playerInAircraft) return;
 
     const wantAim = this.input.mouse.right && this.state.currentWeapon !== "grenade" && this.state.currentWeapon !== "smoke";
     this.state.aiming = wantAim;
@@ -555,6 +570,201 @@ export class GameEngine {
     this.state.playerInVehicle = v.id;
     v.team = "blue";
     soundEngine.playVehicleEnter();
+  }
+
+  // === AIRCRAFT: PLAYER PILOTING ==========================================
+
+  // Enter the nearest grounded/alive aircraft, or bail out of the current one.
+  private tryEnterExitAircraft() {
+    if (this.state.playerInAircraft !== null) {
+      // 脱出: パラシュート降下（単純に現在高度でプレイヤーを解放）
+      const ac = this.state.aircraft.find(a => a.id === this.state.playerInAircraft);
+      if (ac) {
+        this.state.player.pos.copy(ac.pos);
+        this.state.player.vel.set(ac.vel.x * 0.1, 0, ac.vel.z * 0.1);
+        this.state.player.onGround = false;
+      }
+      this.state.playerInAircraft = null;
+      return;
+    }
+    // 搭乗試行: onGround==true かつ alive の機体を近い順に探す
+    let closest: Aircraft | null = null;
+    let closestDist = AIRCRAFT_ENTER_RANGE;
+    for (const ac of this.state.aircraft) {
+      if (!ac.alive || !ac.onGround) continue;
+      const dx = ac.pos.x - this.state.player.pos.x;
+      const dz = ac.pos.z - this.state.player.pos.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist < closestDist) { closestDist = dist; closest = ac; }
+    }
+    if (closest) {
+      this.state.playerInAircraft = closest.id;
+      this.state.playerInVehicle  = null; // 地上車両は降りる
+      soundEngine.playVehicleEnter();     // 搭乗音 (既存流用)
+    }
+  }
+
+  // Flight controller for the player-piloted aircraft. Reads mouse/WASD,
+  // integrates the flight model, handles weapons, landing & crashes, and
+  // parks the FPS camera (player.pos) behind the plane for a chase view.
+  private updatePlayerAircraft(dt: number, time: number) {
+    const ac = this.state.aircraft.find(a => a.id === this.state.playerInAircraft);
+    if (!ac || !ac.alive) {
+      this.state.playerInAircraft = null;
+      return;
+    }
+    const p = this.state.player;
+
+    // ── マウスで機首操作 ──────────────────────────────
+    const md = this.input.consumeMouseDelta();
+    const sens = 0.0018;
+    ac.yaw   -= md.dx * sens;
+    ac.pitch -= md.dy * sens;
+    ac.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, ac.pitch));
+
+    // ── WASD でスロットル・バンク ───────────────────────
+    if (this.input.keys.has("KeyW"))
+      ac.throttle = Math.min(1, ac.throttle + 2 * dt);
+    if (this.input.keys.has("KeyS"))
+      ac.throttle = Math.max(0, ac.throttle - 2 * dt);
+    if (this.input.keys.has("KeyA"))
+      ac.roll = Math.max(-Math.PI * 0.6, ac.roll + 1.8 * dt);
+    if (this.input.keys.has("KeyD"))
+      ac.roll = Math.min(Math.PI * 0.6,  ac.roll - 1.8 * dt);
+
+    // バンク飛行: ロール量に応じてヨーを自動変化
+    ac.yaw -= ac.roll * 0.9 * dt;
+    // ロールを徐々に中立へ戻す
+    ac.roll *= Math.pow(0.15, dt);
+
+    // ── 速度更新 ────────────────────────────────────
+    const maxSpd = ac.kind === "fighter" ? AIRCRAFT_MAX_SPEED : AIRCRAFT_ATK_MAX_SPEED;
+    const cy = Math.cos(ac.pitch);
+    const sy = Math.sin(ac.pitch);
+    const fwd = new THREE.Vector3(
+      -Math.sin(ac.yaw) * cy,
+      sy,
+      -Math.cos(ac.yaw) * cy,
+    );
+    const curSpd  = ac.vel.length();
+    const tgtSpd  = ac.throttle * maxSpd;
+    const newSpd  = curSpd + (tgtSpd - curSpd) * Math.min(1, 3 * dt);
+    ac.vel.copy(fwd).multiplyScalar(newSpd);
+    // 失速補正
+    if (newSpd < AIRCRAFT_STALL_SPEED) ac.vel.y -= AIRCRAFT_GRAVITY * dt * 0.5;
+
+    // 機体は地上待機を離れて飛行状態に
+    if (ac.onGround && newSpd > AIRCRAFT_STALL_SPEED) ac.onGround = false;
+
+    // ── 位置更新 ────────────────────────────────────
+    ac.pos.addScaledVector(ac.vel, dt);
+
+    // 高度上限
+    ac.pos.y = Math.min(ac.pos.y, 800);
+    // 世界端
+    const lim = WORLD_SIZE / 2 - 20;
+    ac.pos.x = Math.max(-lim, Math.min(lim, ac.pos.x));
+    ac.pos.z = Math.max(-lim, Math.min(lim, ac.pos.z));
+
+    // ── 地面判定 ────────────────────────────────────
+    if (ac.pos.y < 0.8) {
+      ac.pos.y = 0.8;
+      if (newSpd < 35) {
+        // 着陸成功
+        ac.onGround = true;
+        ac.vel.set(0, 0, 0);
+        ac.pitch   = 0;
+        ac.roll    = 0;
+        ac.throttle = 0;
+      } else {
+        // クラッシュ
+        ac.alive = false;
+        ac.onGround = false;
+        this.state.playerInAircraft = null;
+        this.state.explosions.push({ pos: ac.pos.clone(), age: 0, ttl: 0.9 });
+        this.state.shake = 0.8;
+        soundEngine.playExplosion();
+      }
+    }
+
+    // ── 武装 ─────────────────────────────────────────
+    // 機関銃: 左クリック
+    if (this.input.mouse.left) {
+      this.playerAircraftGunFire(ac, time);
+    }
+    // 爆弾: スペース (attacker のみ)
+    if (ac.kind === "attacker" && this.input.keys.has("Space")) {
+      this.dropBomb(ac);   // 第1回実装済み
+      soundEngine.playBombDrop();
+      this.input.keys.delete("Space");
+    }
+
+    // ── カメラ追従: player.pos を機体後方に置く ─────────
+    const back = fwd.clone().multiplyScalar(-14);
+    p.pos.set(ac.pos.x + back.x, ac.pos.y + 4, ac.pos.z + back.z);
+    p.yaw   = ac.yaw;
+    p.pitch = ac.pitch;
+    p.vel.set(0, 0, 0);
+    p.onGround = false;
+  }
+
+  // Player nose machine gun: ray from the nose, hits enemy soldiers, draws a
+  // tracer trail, applies damage / kills / score, plays a shot sound.
+  private playerAircraftGunFire(ac: Aircraft, time: number) {
+    const interval = 60 / 1200; // 1200 RPM
+    if (time - ac.lastGunAt < interval) return;
+    if (ac.gunAmmo <= 0) return;
+    ac.lastGunAt = time;
+    ac.gunAmmo  -= 1;
+
+    // 機首方向へのレイ
+    const cy = Math.cos(ac.pitch);
+    const fwd = new THREE.Vector3(
+      -Math.sin(ac.yaw) * cy,
+      Math.sin(ac.pitch),
+      -Math.cos(ac.yaw) * cy,
+    );
+    const gunEnd = ac.pos.clone().addScaledVector(fwd, 600);
+
+    // トレイル
+    this.state.aircraftGunTrails.push({
+      from: ac.pos.clone(),
+      to:   gunEnd,
+      ttl:  0.06,
+    });
+
+    // ヒット判定: 全 Soldier をレイとの最近接距離で判定
+    for (const s of this.state.soldiers) {
+      if (!s.alive) continue;
+      // team blue の機関銃は red だけを狙う
+      if (ac.team === "blue" && s.team !== "red") continue;
+      const toS = s.pos.clone().sub(ac.pos);
+      const t   = Math.max(0, Math.min(1, toS.dot(fwd) / 600));
+      const closest = ac.pos.clone().addScaledVector(fwd, t * 600);
+      if (closest.distanceTo(s.pos) < 1.2) {
+        const dmg = 18 * (0.7 + Math.random() * 0.6);
+        s.hp -= dmg;
+        this.state.damageNumbers.push({
+          id:     this.state.nextDmgId++,
+          pos:    s.pos.clone().add(new THREE.Vector3(0, 2, 0)),
+          amount: Math.round(dmg),
+          ttl:    0.9,
+          isCrit: false,
+        });
+        this.state.hitMarker = 0.15;
+        if (s.hp <= 0 && s.alive) {
+          s.alive = false;
+          if (ac.team === "blue" && s.team === "red") {
+            this.state.kills  += 1;
+            this.state.score  += 80;
+            this.state.blueScore += 1;
+          }
+          this.spawnRagdoll(s);
+        }
+      }
+    }
+
+    soundEngine.playShot(); // 既存流用
   }
 
   switchWeapon(id: WeaponId) {
