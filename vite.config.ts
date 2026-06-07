@@ -45,6 +45,21 @@ export default defineConfig({
     // Drop dead code / debugging statements from the production bundle to
     // shave a little more off the shipped JS without touching behaviour.
     target: "es2020",
+    // Use terser for the final minify pass. It compresses noticeably better
+    // than the default esbuild minifier on large code bases like this one and
+    // lets us strip dev-only `console.*` / `debugger` statements. Output is
+    // behaviourally identical — only dead/diagnostic code is removed.
+    minify: "terser",
+    terserOptions: {
+      compress: {
+        drop_console: true,
+        drop_debugger: true,
+        passes: 2,
+      },
+      format: {
+        comments: false,
+      },
+    },
     rollupOptions: {
       output: {
         // Split only the heavy, self-contained three.js engine into its own
