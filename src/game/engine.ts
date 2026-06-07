@@ -649,41 +649,59 @@ export class GameEngine {
     const curSpd  = ac.vel.length();
     const tgtSpd  = ac.throttle * maxSpd;
     const newSpd  = curSpd + (tgtSpd - curSpd) * Math.min(1, 3 * dt);
-    ac.vel.copy(fwd).multiplyScalar(newSpd);
-    // 失速補正
-    if (newSpd < AIRCRAFT_STALL_SPEED) ac.vel.y -= AIRCRAFT_GRAVITY * dt * 0.5;
 
-    // 機体は地上待機を離れて飛行状態に
-    if (ac.onGround && newSpd > AIRCRAFT_STALL_SPEED) ac.onGround = false;
-
-    // ── 位置更新 ────────────────────────────────────
-    ac.pos.addScaledVector(ac.vel, dt);
-
-    // 高度上限
-    ac.pos.y = Math.min(ac.pos.y, 800);
-    // 世界端
-    const lim = WORLD_SIZE / 2 - 20;
-    ac.pos.x = Math.max(-lim, Math.min(lim, ac.pos.x));
-    ac.pos.z = Math.max(-lim, Math.min(lim, ac.pos.z));
-
-    // ── 地面判定 ────────────────────────────────────
-    if (ac.pos.y < 0.8) {
-      ac.pos.y = 0.8;
-      if (newSpd < 35) {
-        // 着陸成功
-        ac.onGround = true;
-        ac.vel.set(0, 0, 0);
-        ac.pitch   = 0;
-        ac.roll    = 0;
-        ac.throttle = 0;
-      } else {
-        // クラッシュ
-        ac.alive = false;
+    // 滑走路上を滑走中 (onGround) は、揚力発生速度に達するまで地面に沿って
+    // 水平に加速する。離陸前に重力で機体が地面にめり込むと着陸判定が毎フレーム
+    // スロットルを 0 に戻してしまい、いつまでも加速できなかった。離陸滑走中は
+    // 重力・着陸判定を止め、機体を滑走路高さに固定して純粋に加速させる。
+    if (ac.onGround) {
+      // 機首は水平 (ピッチ無視) のまま前進方向だけで加速。
+      const groundFwd = new THREE.Vector3(-Math.sin(ac.yaw), 0, -Math.cos(ac.yaw));
+      ac.vel.copy(groundFwd).multiplyScalar(newSpd);
+      ac.pos.addScaledVector(ac.vel, dt);
+      ac.pos.y = 0.8; // 滑走路面に固定
+      // 揚力発生速度に達したら離陸。
+      if (newSpd > AIRCRAFT_LIFT_SPEED) {
         ac.onGround = false;
-        this.state.playerInAircraft = null;
-        this.state.explosions.push({ pos: ac.pos.clone(), age: 0, ttl: 0.9 });
-        this.state.shake = 0.8;
-        soundEngine.playExplosion();
+      }
+      // 世界端クランプ
+      const lim0 = WORLD_SIZE / 2 - 20;
+      ac.pos.x = Math.max(-lim0, Math.min(lim0, ac.pos.x));
+      ac.pos.z = Math.max(-lim0, Math.min(lim0, ac.pos.z));
+    } else {
+      ac.vel.copy(fwd).multiplyScalar(newSpd);
+      // 失速補正
+      if (newSpd < AIRCRAFT_STALL_SPEED) ac.vel.y -= AIRCRAFT_GRAVITY * dt * 0.5;
+
+      // ── 位置更新 ────────────────────────────────────
+      ac.pos.addScaledVector(ac.vel, dt);
+
+      // 高度上限
+      ac.pos.y = Math.min(ac.pos.y, 800);
+      // 世界端
+      const lim = WORLD_SIZE / 2 - 20;
+      ac.pos.x = Math.max(-lim, Math.min(lim, ac.pos.x));
+      ac.pos.z = Math.max(-lim, Math.min(lim, ac.pos.z));
+
+      // ── 地面判定 ────────────────────────────────────
+      if (ac.pos.y < 0.8) {
+        ac.pos.y = 0.8;
+        if (newSpd < 35) {
+          // 着陸成功
+          ac.onGround = true;
+          ac.vel.set(0, 0, 0);
+          ac.pitch   = 0;
+          ac.roll    = 0;
+          ac.throttle = 0;
+        } else {
+          // クラッシュ
+          ac.alive = false;
+          ac.onGround = false;
+          this.state.playerInAircraft = null;
+          this.state.explosions.push({ pos: ac.pos.clone(), age: 0, ttl: 0.9 });
+          this.state.shake = 0.8;
+          soundEngine.playExplosion();
+        }
       }
     }
 
