@@ -6,6 +6,11 @@ export interface Wall {
   size: THREE.Vector3; // full extents
   color: string;
   kind: "wall" | "roof" | "floor" | "pillar" | "barrier" | "ground-debris";
+  // Purely visual trim (window sills/lintels, plinths, string-courses). These
+  // are rendered like any other wall but are skipped when building the static
+  // collision boxes, so the thousands of small façade ledges add realism
+  // without bloating the physics broadphase or blocking the player.
+  decorative?: boolean;
 }
 
 export interface Building {
@@ -909,26 +914,72 @@ export function generateWorld(): World {
   for (const b of buildings) {
     if (!b.info) continue;
     if (b.info.color === HANGAR_COLOR) continue; // hangars have no windows
-    const { cx, cz, w: bw, d: bd, floors, floorH, doorSide } = b.info;
+    const { cx, cz, w: bw, d: bd, floors, floorH, doorSide, roofColor } = b.info;
     const nx = Math.max(1, Math.floor(bw / 3.2));
     const nz = Math.max(1, Math.floor(bd / 3.2));
-    const winH = 1.1;
-    const winW = 0.8;
+    // Slightly taller, properly proportioned windows.
+    const winH = 1.45;
+    const winW = 0.95;
+    // Trim (sills + lintels + plinth) is rendered as instanced concrete boxes in
+    // the building's own roof colour so each window gains a real protruding
+    // ledge above and below the glass — the single biggest cue that turns a flat
+    // painted rectangle into a believable framed opening. Pushed onto the
+    // building's wall list (collected into the global walls array further down).
+    const trimT = 0.14;     // ledge protrusion beyond the facade
+    const trimH = 0.12;     // ledge height
+    const ledgeOver = 0.22; // how far the ledge overhangs the window width
+    // sill = below glass, lintel = above glass
+    const addTrimZ = (px: number, y: number, faceZ: number, dir: number) => {
+      b.walls.push({
+        pos: new THREE.Vector3(px, y, faceZ + dir * (trimT / 2)),
+        size: new THREE.Vector3(winW + ledgeOver, trimH, trimT),
+        color: roofColor,
+        kind: "barrier",
+        decorative: true,
+      });
+    };
+    const addTrimX = (faceX: number, y: number, pz: number, dir: number) => {
+      b.walls.push({
+        pos: new THREE.Vector3(faceX + dir * (trimT / 2), y, pz),
+        size: new THREE.Vector3(trimT, trimH, winW + ledgeOver),
+        color: roofColor,
+        kind: "barrier",
+        decorative: true,
+      });
+    };
     for (let f = 0; f < floors; f++) {
       const sillY = f * floorH + floorH * 0.5;
+      const belowY = sillY - winH / 2 - trimH / 2;
+      const aboveY = sillY + winH / 2 + trimH / 2;
       for (let i = 0; i < nx; i++) {
         const fx = b.min.x + (i + 0.5) * (bw / nx);
         const overDoorZpos = f === 0 && doorSide === 0 && Math.abs(fx - cx) < 1.3;
         const overDoorZneg = f === 0 && doorSide === 1 && Math.abs(fx - cx) < 1.3;
-        if (!overDoorZpos) windows.push({ pos: new THREE.Vector3(fx, sillY, b.max.z + 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.55 });
-        if (!overDoorZneg) windows.push({ pos: new THREE.Vector3(fx, sillY, b.min.z - 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.55 });
+        if (!overDoorZpos) {
+          windows.push({ pos: new THREE.Vector3(fx, sillY, b.max.z + 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.55 });
+          addTrimZ(fx, belowY, b.max.z, 1);
+          addTrimZ(fx, aboveY, b.max.z, 1);
+        }
+        if (!overDoorZneg) {
+          windows.push({ pos: new THREE.Vector3(fx, sillY, b.min.z - 0.06), size: new THREE.Vector3(winW, winH, 0.06), lit: rng() > 0.55 });
+          addTrimZ(fx, belowY, b.min.z, -1);
+          addTrimZ(fx, aboveY, b.min.z, -1);
+        }
       }
       for (let i = 0; i < nz; i++) {
         const fz = b.min.z + (i + 0.5) * (bd / nz);
         const overDoorXpos = f === 0 && doorSide === 2 && Math.abs(fz - cz) < 1.3;
         const overDoorXneg = f === 0 && doorSide === 3 && Math.abs(fz - cz) < 1.3;
-        if (!overDoorXpos) windows.push({ pos: new THREE.Vector3(b.max.x + 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.55 });
-        if (!overDoorXneg) windows.push({ pos: new THREE.Vector3(b.min.x - 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.55 });
+        if (!overDoorXpos) {
+          windows.push({ pos: new THREE.Vector3(b.max.x + 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.55 });
+          addTrimX(b.max.x, belowY, fz, 1);
+          addTrimX(b.max.x, aboveY, fz, 1);
+        }
+        if (!overDoorXneg) {
+          windows.push({ pos: new THREE.Vector3(b.min.x - 0.06, sillY, fz), size: new THREE.Vector3(0.06, winH, winW), lit: rng() > 0.55 });
+          addTrimX(b.min.x, belowY, fz, -1);
+          addTrimX(b.min.x, aboveY, fz, -1);
+        }
       }
       if (f >= 1 && rng() < 0.35) {
         const balconyY = f * floorH + 0.2;
@@ -938,6 +989,33 @@ export function generateWorld(): World {
         else if (bSide === 1) awnings.push({ pos: new THREE.Vector3(cx, balconyY, b.min.z - 0.7), size: new THREE.Vector3(Math.min(bw * 0.6, 3), 0.16, 1.3), color: bColor });
         else if (bSide === 2) awnings.push({ pos: new THREE.Vector3(b.max.x + 0.7, balconyY, cz), size: new THREE.Vector3(1.3, 0.16, Math.min(bd * 0.6, 3)), color: bColor });
         else awnings.push({ pos: new THREE.Vector3(b.min.x - 0.7, balconyY, cz), size: new THREE.Vector3(1.3, 0.16, Math.min(bd * 0.6, 3)), color: bColor });
+      }
+    }
+    // Base plinth: a slightly wider, darker concrete band wrapping the ground
+    // floor so the building reads as sitting on a real foundation course rather
+    // than meeting the sand with a knife edge.
+    {
+      const plinthH = 0.55;
+      const plinthOut = 0.18;
+      const py = b.min.y + plinthH / 2;
+      const plinthColor = roofColor;
+      b.walls.push({ pos: new THREE.Vector3(cx, py, b.max.z + plinthOut / 2), size: new THREE.Vector3(bw + plinthOut * 2, plinthH, plinthOut), color: plinthColor, kind: "barrier", decorative: true });
+      b.walls.push({ pos: new THREE.Vector3(cx, py, b.min.z - plinthOut / 2), size: new THREE.Vector3(bw + plinthOut * 2, plinthH, plinthOut), color: plinthColor, kind: "barrier", decorative: true });
+      b.walls.push({ pos: new THREE.Vector3(b.max.x + plinthOut / 2, py, cz), size: new THREE.Vector3(plinthOut, plinthH, bd), color: plinthColor, kind: "barrier", decorative: true });
+      b.walls.push({ pos: new THREE.Vector3(b.min.x - plinthOut / 2, py, cz), size: new THREE.Vector3(plinthOut, plinthH, bd), color: plinthColor, kind: "barrier", decorative: true });
+    }
+    // String-course bands marking each upper floor line — a thin protruding
+    // cornice that breaks up tall blank facades the way real concrete buildings
+    // have storey-divider mouldings.
+    if (floors >= 2) {
+      const bandH = 0.16;
+      const bandOut = 0.1;
+      for (let f = 1; f < floors; f++) {
+        const by = b.min.y + f * floorH;
+        b.walls.push({ pos: new THREE.Vector3(cx, by, b.max.z + bandOut / 2), size: new THREE.Vector3(bw + bandOut * 2, bandH, bandOut), color: roofColor, kind: "barrier", decorative: true });
+        b.walls.push({ pos: new THREE.Vector3(cx, by, b.min.z - bandOut / 2), size: new THREE.Vector3(bw + bandOut * 2, bandH, bandOut), color: roofColor, kind: "barrier", decorative: true });
+        b.walls.push({ pos: new THREE.Vector3(b.max.x + bandOut / 2, by, cz), size: new THREE.Vector3(bandOut, bandH, bd), color: roofColor, kind: "barrier", decorative: true });
+        b.walls.push({ pos: new THREE.Vector3(b.min.x - bandOut / 2, by, cz), size: new THREE.Vector3(bandOut, bandH, bd), color: roofColor, kind: "barrier", decorative: true });
       }
     }
     const awColor = tentColors2[Math.floor(rng() * tentColors2.length)];
@@ -2310,6 +2388,9 @@ export interface Box {
 export function worldToBoxes(world: World): Box[] {
   const boxes: Box[] = [];
   for (const w of world.walls) {
+    // Decorative façade trim (sills, lintels, plinths, string-courses) is
+    // visual only — never a collider.
+    if (w.decorative) continue;
     boxes.push({
       min: new THREE.Vector3(
         w.pos.x - w.size.x / 2,
