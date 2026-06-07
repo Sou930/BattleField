@@ -19,6 +19,7 @@ export class Input {
   vehicleBrake = false;
   enterVehiclePressed = false;
   mapTogglePressed = false;
+  aircraftEnterPressed = false;
 
   private el: HTMLElement;
   private onKey = (e: KeyboardEvent, down: boolean) => {
@@ -26,6 +27,7 @@ export class Input {
     else this.keys.delete(e.code);
     if (down && e.code === "KeyE") this.pickupPressed = true;
     if (down && e.code === "KeyM") this.mapTogglePressed = true;
+    if (down && e.code === "KeyG") this.aircraftEnterPressed = true;
   };
   private onMove = (e: MouseEvent) => {
     if (!this.locked) return;
@@ -88,6 +90,7 @@ export class Input {
   pressPickup() { this.pickupPressed = true; }
   pressSwitchWeapon(n: number) { this.weaponSwitchPressed = n; }
   pressEnterVehicle() { this.enterVehiclePressed = true; }
+  pressAircraftEnter() { this.aircraftEnterPressed = true; }
   pressMapToggle() { this.mapTogglePressed = true; }
   setVehicleGas(on: boolean) { this.vehicleGas = on; }
   setVehicleBrake(on: boolean) { this.vehicleBrake = on; }

@@ -60,6 +60,8 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
   const capturePoints = useGame((s) => s.capturePoints);
   const vehicles = useGame((s) => s.vehicles);
   const playerInVehicle = useGame((s) => s.playerInVehicle);
+  const playerInAircraft = useGame((s) => s.playerInAircraft);
+  const aircraft = useGame((s) => s.aircraft);
   const playerClass = useGame((s) => s.loadout.soldierClass);
   const mapOpen = useGame((s) => s.mapOpen);
 
@@ -72,6 +74,21 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
   const isSniperScope = (currentWeapon === "rifle" || currentWeapon === "sniper") && aimT > 0.5;
   const nearbyPickup = nearbyPickupId ? pickups.find((p) => p.id === nearbyPickupId) : null;
   const nearbyVehicle = nearbyVehicleId ? vehicles.find((v) => v.id === nearbyVehicleId) : null;
+
+  // 搭乗中の機体オブジェクトを導出
+  const myAircraft = playerInAircraft
+    ? aircraft.find((a) => a.id === playerInAircraft) ?? null
+    : null;
+
+  // 徒歩時: 近くに onGround の機体があるか
+  const nearbyAircraft = !playerInAircraft
+    ? aircraft.find((a) => {
+        if (!a.alive || !a.onGround) return false;
+        const dx = a.pos.x - playerPos.x;
+        const dz = a.pos.z - playerPos.z;
+        return Math.sqrt(dx * dx + dz * dz) < 8;
+      }) ?? null
+    : null;
 
   return (
     <div className="pointer-events-none absolute inset-0 select-none font-mono text-foreground">
@@ -127,7 +144,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
         </div>
       )}
 
-      {status === "playing" && aimT < 0.5 && (
+      {status === "playing" && aimT < 0.5 && !playerInAircraft && (
         <div className="absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2" style={{ opacity: 1 - aimT * 2 }}>
           <div className="absolute left-1/2 top-0 h-2 w-[2px] -translate-x-1/2 bg-[hsl(var(--hud))]" />
           <div className="absolute bottom-0 left-1/2 h-2 w-[2px] -translate-x-1/2 bg-[hsl(var(--hud))]" />
@@ -219,8 +236,64 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
         </div>
       )}
 
+      {/* Aircraft board prompt (徒歩時のみ) */}
+      {status === "playing" && nearbyAircraft && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-black/60 text-white px-4 py-2 rounded text-sm font-mono">
+          ✈ G キーで搭乗
+        </div>
+      )}
+
+      {/* 航空計器パネル（搭乗中のみ表示） */}
+      {status === "playing" && myAircraft && (
+        <div className="absolute bottom-4 left-4 w-52 bg-black/70 text-green-400 font-mono text-xs p-3 rounded border border-green-800">
+          <div className="text-green-300 mb-1 text-sm">✈ {myAircraft.kind.toUpperCase()}</div>
+          <div>SPD  {Math.round(myAircraft.vel.length() * 3.6)} km/h</div>
+          <div>ALT  {Math.round(myAircraft.pos.y)} m</div>
+          <div className="mt-1">
+            THR
+            <span className="ml-1 inline-block w-24 h-2 bg-gray-700 align-middle rounded">
+              <span
+                className="block h-2 bg-green-500 rounded"
+                style={{ width: `${myAircraft.throttle * 100}%` }}
+              />
+            </span>
+          </div>
+          <div>GUN  {myAircraft.gunAmmo}/{myAircraft.gunAmmoMax}</div>
+          {myAircraft.kind === "attacker" && (
+            <div>BOMB {myAircraft.bombCount}/{myAircraft.bombMax}</div>
+          )}
+          <div className="mt-2 text-gray-400 text-[10px] leading-4">
+            W/S スロットル<br />
+            A/D バンク<br />
+            マウス 機首操作<br />
+            左クリック 機関銃<br />
+            {myAircraft.kind === "attacker" && (<>SPACE 爆弾投下<br /></>)}
+            G 脱出
+          </div>
+        </div>
+      )}
+
+      {/* 航空照準（搭乗中のみ表示） */}
+      {status === "playing" && playerInAircraft && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          {/* 中央リング */}
+          <div className="w-6 h-6 rounded-full border border-white/80 flex items-center justify-center">
+            <div className="w-1 h-1 bg-white rounded-full" />
+          </div>
+          {/* 速度ベクトル方向インジケータ (簡易版: 30px 前方の菱形) */}
+          <div
+            className="absolute w-3 h-3 border border-yellow-300 rotate-45"
+            style={{
+              transform: "translate(-50%,-50%) rotate(45deg)",
+              top: "calc(50% - 30px)",
+              left: "50%",
+            }}
+          />
+        </div>
+      )}
+
       {/* Pickup prompt */}
-      {status === "playing" && nearbyPickup && !playerInVehicle && (
+      {status === "playing" && nearbyPickup && !playerInVehicle && !playerInAircraft && (
         <div className="absolute left-1/2 top-[58%] -translate-x-1/2 rounded border border-[hsl(var(--hud)/0.6)] bg-background/80 px-4 py-2 text-center backdrop-blur-sm">
           <div className="text-[10px] uppercase tracking-[0.3em] text-[hsl(var(--hud))]">
             {isMobile ? "Tap PICK UP" : "Press [E]"}
@@ -238,7 +311,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
       )}
 
       {/* Vehicle enter prompt */}
-      {status === "playing" && nearbyVehicle && !playerInVehicle && !nearbyPickup && (
+      {status === "playing" && nearbyVehicle && !playerInVehicle && !playerInAircraft && !nearbyPickup && (
         <div className="absolute left-1/2 top-[58%] -translate-x-1/2 rounded border border-[hsl(var(--ammo)/0.6)] bg-background/80 px-4 py-2 text-center backdrop-blur-sm">
           <div className="text-[10px] uppercase tracking-[0.3em] text-[hsl(var(--ammo))]">
             {isMobile ? "Tap ENTER" : "Press [F]"}
@@ -269,7 +342,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
       )}
 
       {/* Bottom-right: weapon */}
-      {status === "playing" && !playerInVehicle && (
+      {status === "playing" && !playerInVehicle && !playerInAircraft && (
         <div className="absolute bottom-6 right-6 rounded border border-[hsl(var(--hud)/0.4)] bg-background/60 p-3 backdrop-blur-sm">
           <div className="text-right text-xs uppercase tracking-widest text-[hsl(var(--hud))]">{w.spec.name}</div>
           <div className="mt-1 flex items-baseline justify-end gap-2 tabular-nums">
@@ -320,7 +393,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
 
       {/* Mobile touch controls */}
       {status === "playing" && isMobile && input && (
-        <MobileControls input={input} hasPickup={!!nearbyPickup} hasVehicle={!!nearbyVehicle} inVehicle={!!playerInVehicle} />
+        <MobileControls input={input} hasPickup={!!nearbyPickup} hasVehicle={!!nearbyVehicle} inVehicle={!!playerInVehicle} hasAircraft={!!nearbyAircraft} inAircraft={!!playerInAircraft} />
       )}
 
       {/* Minimap */}
@@ -389,14 +462,27 @@ function MobileControls({
   hasPickup,
   hasVehicle,
   inVehicle,
+  hasAircraft,
+  inAircraft,
 }: {
   input: MutableRefObject<Input | null>;
   hasPickup: boolean;
   hasVehicle: boolean;
   inVehicle: boolean;
+  hasAircraft: boolean;
+  inAircraft: boolean;
 }) {
   return (
     <>
+      {/* Aircraft enter/exit button (徒歩で機体が近い時、または搭乗中) */}
+      {(hasAircraft || inAircraft) && (
+        <button
+          className="pointer-events-auto absolute right-4 bottom-40 w-14 h-14 rounded-full bg-gray-700/80 text-white text-lg flex items-center justify-center active:bg-gray-500"
+          onPointerDown={() => { if (input?.current) input.current.aircraftEnterPressed = true; }}
+        >
+          ✈
+        </button>
+      )}
       {/* Movement joystick (left) - works for both on-foot and vehicle */}
       <Joystick
         side="left"

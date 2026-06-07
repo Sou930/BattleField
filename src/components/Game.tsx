@@ -194,11 +194,21 @@ function Scene({ engine }: { engine: GameEngine }) {
     const shakeX = (Math.random() - 0.5) * sh * 0.15;
     const shakeY = (Math.random() - 0.5) * sh * 0.15;
     camera.position.set(p.pos.x + shakeX, p.pos.y + shakeY, p.pos.z);
-    const e = new THREE.Euler(p.pitch, p.yaw, 0, "YXZ");
-    camera.quaternion.setFromEuler(e);
+    if (engine.state.playerInAircraft) {
+      // 航空機モード: engine 側で player.pos を機体後方に更新済み。
+      // 機首の yaw/pitch でカメラを向け、ロールは適用しない (z=0)。
+      camera.rotation.order = "YXZ";
+      camera.rotation.set(p.pitch, p.yaw, 0);
+    } else {
+      const e = new THREE.Euler(p.pitch, p.yaw, 0, "YXZ");
+      camera.quaternion.setFromEuler(e);
+    }
     const baseFov = 78;
     const aimedFov = engine.state.currentWeapon === "sniper" ? 18 : engine.state.currentWeapon === "rifle" ? 32 : 50;
-    const targetFov = baseFov + (aimedFov - baseFov) * engine.state.aimT;
+    // 航空機搭乗中は常に広角 (aim zoom を無効化)。
+    const targetFov = engine.state.playerInAircraft
+      ? baseFov
+      : baseFov + (aimedFov - baseFov) * engine.state.aimT;
     const persp = camera as THREE.PerspectiveCamera;
     if (Math.abs(persp.fov - targetFov) > 0.05) {
       persp.fov = targetFov;
@@ -2554,6 +2564,8 @@ export default function Game() {
       set pickupPressed(v: boolean) { input.pickupPressed = v; },
       get enterVehiclePressed() { return input.enterVehiclePressed; },
       set enterVehiclePressed(v: boolean) { input.enterVehiclePressed = v; },
+      get aircraftEnterPressed() { return input.aircraftEnterPressed; },
+      set aircraftEnterPressed(v: boolean) { input.aircraftEnterPressed = v; },
       get weaponSwitchPressed() { return input.weaponSwitchPressed; },
       set weaponSwitchPressed(v: number | null) { input.weaponSwitchPressed = v; },
       get vehicleGas() { return input.vehicleGas; },

@@ -15,6 +15,31 @@ function makeEngine() {
   return new GameEngine(state, input, world);
 }
 
+// A controllable input object exposing the mutable fields the player
+// piloting code reads (keys / mouse / aircraftEnterPressed / mouse delta).
+function makeControllableEngine() {
+  const state = createInitialState();
+  state.enemies = state.soldiers;
+  let mouseDelta = { dx: 0, dy: 0 };
+  const input: GameEngine["input"] & {
+    aircraftEnterPressed: boolean;
+    setMouseDelta: (dx: number, dy: number) => void;
+  } = {
+    keys: new Set<string>(),
+    consumeMouseDelta: () => {
+      const d = mouseDelta;
+      mouseDelta = { dx: 0, dy: 0 };
+      return d;
+    },
+    mouse: { left: false, right: false },
+    aircraftEnterPressed: false,
+    setMouseDelta: (dx: number, dy: number) => { mouseDelta = { dx, dy }; },
+  };
+  const world = generateWorld();
+  const engine = new GameEngine(state, input, world);
+  return { engine, input };
+}
+
 describe("runway spawns", () => {
   const world = generateWorld();
 
@@ -54,5 +79,100 @@ describe("aircraft spawn", () => {
     const attacker = attackers[0];
     expect(attacker.bombMax).toBe(4);
     expect(attacker.bombCount).toBe(4);
+  });
+});
+
+describe("player aircraft piloting", () => {
+  it("boards the nearest grounded aircraft with G and exits with G", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+
+    // Stand right next to the first grounded aircraft.
+    const ac = engine.state.aircraft[0];
+    engine.state.player.pos.set(ac.pos.x + 2, 1.65, ac.pos.z);
+
+    // Press G -> board.
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+    expect(engine.state.playerInAircraft).toBe(ac.id);
+
+    // Press G again -> exit (parachute release).
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1.1);
+    expect(engine.state.playerInAircraft).toBeNull();
+  });
+
+  it("throttle (W) accelerates the plane and lifts it off the runway", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+    const ac = engine.state.aircraft.find((a) => a.kind === "fighter")!;
+    engine.state.player.pos.copy(ac.pos);
+    engine.state.player.pos.y = 1.65;
+
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+    expect(engine.state.playerInAircraft).toBe(ac.id);
+
+    // Clear AI soldiers so the per-frame cost is just the flight model
+    // (keeps this physics-focused test fast & deterministic).
+    engine.state.soldiers.length = 0;
+
+    // Hold W (throttle up) and a slight nose-up for several frames.
+    input.keys.add("KeyW");
+    for (let i = 0; i < 80; i++) {
+      ac.pitch = 0.2; // climb attitude each frame
+      engine.update(0.05, 2 + i * 0.05);
+    }
+    expect(ac.throttle).toBeGreaterThan(0.5);
+    expect(ac.vel.length()).toBeGreaterThan(40);
+    expect(ac.onGround).toBe(false);
+  });
+
+  it("nose machine gun fires, draws a tracer trail, and damages an enemy", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+    const ac = engine.state.aircraft.find((a) => a.kind === "fighter")!;
+    engine.state.player.pos.copy(ac.pos);
+    engine.state.player.pos.y = 1.65;
+
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+
+    // Place a red enemy directly ahead along the nose (yaw 0 => -Z forward).
+    ac.pitch = 0;
+    ac.roll = 0;
+    const enemy = engine.state.soldiers.find((s) => s.team === "red" && s.alive)!;
+    enemy.pos.set(ac.pos.x, ac.pos.y, ac.pos.z - 100);
+    const hpBefore = enemy.hp;
+
+    input.mouse.left = true;
+    engine.update(0.05, 5);
+
+    expect(engine.state.aircraftGunTrails.length).toBeGreaterThan(0);
+    expect(enemy.hp).toBeLessThan(hpBefore);
+  });
+
+  it("attacker drops a bomb with Space", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+    const ac = engine.state.aircraft.find((a) => a.kind === "attacker")!;
+    engine.state.player.pos.copy(ac.pos);
+    engine.state.player.pos.y = 1.65;
+
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+    expect(engine.state.playerInAircraft).toBe(ac.id);
+
+    const bombsBefore = ac.bombCount;
+    ac.pos.y = 120; // airborne so the bomb has room to fall
+    input.keys.add("Space");
+    engine.update(0.05, 6);
+
+    expect(ac.bombCount).toBe(bombsBefore - 1);
+    expect(engine.state.aircraftBombs.length).toBeGreaterThan(0);
   });
 });

@@ -215,6 +215,26 @@ class SoundEngine {
     osc.stop(ctx.currentTime + 1.0);
   }
 
+  // Bomb drop: descending whistle gliding 200 -> 80 Hz over 0.5s, fading out.
+  playBombDrop() {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(200, ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(80, ctx.currentTime + 0.5);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.0, ctx.currentTime + 0.5);
+
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.5);
+  }
+
   // Damage taken
   playDamage() {
     const ctx = this.ensureCtx();
