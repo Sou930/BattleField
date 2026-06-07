@@ -256,6 +256,7 @@ function Scene({ engine }: { engine: GameEngine }) {
       <Roofs />
       <Crates />
       <Containers />
+      <FuelTanks />
       <Barrels />
       <Sandbags />
       <Palms />
@@ -2129,6 +2130,66 @@ function Containers() {
         metalness={0.3}
       />
     </instancedMesh>
+  );
+}
+
+// Large cylindrical fuel-farm storage tanks. Each tank is an upright capped
+// cylinder with a thin domed top accent and a painted band, rendered with the
+// rusty-metal PBR set so it reads as a real welded-steel tank.
+function FuelTanks() {
+  const items = sharedWorld.fuelTanks;
+  const bodyRef = useRef<THREE.InstancedMesh>(null);
+  const topRef = useRef<THREE.InstancedMesh>(null);
+  const pbr = useTiledPBR(barrelDiffUrl, barrelNorUrl, barrelRoughUrl, 3, 2, 8);
+  useEffect(() => {
+    const body = bodyRef.current;
+    const top = topRef.current;
+    if (!body) return;
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    items.forEach((t, i) => {
+      dummy.position.set(t.pos.x, t.pos.y + t.height / 2, t.pos.z);
+      dummy.scale.set(t.radius, t.height, t.radius);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      body.setMatrixAt(i, dummy.matrix);
+      color.set(t.color);
+      body.setColorAt(i, color);
+      if (top) {
+        dummy.position.set(t.pos.x, t.pos.y + t.height + 0.05, t.pos.z);
+        dummy.scale.set(t.radius * 1.02, t.radius * 0.35, t.radius * 1.02);
+        dummy.updateMatrix();
+        top.setMatrixAt(i, dummy.matrix);
+        top.setColorAt(i, color.multiplyScalar(0.92));
+      }
+    });
+    body.instanceMatrix.needsUpdate = true;
+    if (body.instanceColor) body.instanceColor.needsUpdate = true;
+    if (top) {
+      top.instanceMatrix.needsUpdate = true;
+      if (top.instanceColor) top.instanceColor.needsUpdate = true;
+    }
+  }, [items]);
+  if (items.length === 0) return null;
+  return (
+    <group>
+      <instancedMesh ref={bodyRef} args={[undefined, undefined, items.length]} castShadow receiveShadow>
+        <cylinderGeometry args={[1, 1, 1, 28]} />
+        <meshStandardMaterial
+          map={pbr.map}
+          normalMap={pbr.normalMap}
+          roughnessMap={pbr.roughnessMap}
+          normalScale={new THREE.Vector2(0.5, 0.5)}
+          color="#ffffff"
+          roughness={0.85}
+          metalness={0.35}
+        />
+      </instancedMesh>
+      <instancedMesh ref={topRef} args={[undefined, undefined, items.length]} castShadow receiveShadow>
+        <sphereGeometry args={[1, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2]} />
+        <meshStandardMaterial color="#ffffff" roughness={0.7} metalness={0.4} />
+      </instancedMesh>
+    </group>
   );
 }
 

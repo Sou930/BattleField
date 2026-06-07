@@ -57,6 +57,15 @@ export interface Container {
   color: string;
 }
 
+// A large cylindrical fuel / water storage tank (airbase fuel farm). Rendered
+// as an upright capped cylinder; purely decorative set-dressing + soft cover.
+export interface FuelTank {
+  pos: THREE.Vector3; // base centre (y = ground)
+  radius: number;
+  height: number;
+  color: string;
+}
+
 // An explicitly authored sniper firing position. Each post sits on the high
 // ground of a desert outpost (a raised platform / tower nest) and stores the
 // direction it overwatches plus the relative elevation advantage it enjoys
@@ -546,6 +555,7 @@ export interface World {
   hills: TerrainHill[];
   parkedVehicles: ParkedVehicle[];
   containers: Container[];
+  fuelTanks: FuelTank[];
   outposts: Outpost[];
   sniperPosts: SniperPost[];
   fountainPos: THREE.Vector3;
@@ -575,6 +585,7 @@ export function generateWorld(): World {
   const hills: TerrainHill[] = [];
   const parkedVehicles: ParkedVehicle[] = [];
   const containers: Container[] = [];
+  const fuelTanks: FuelTank[] = [];
   const outposts: Outpost[] = [];
   const sniperPosts: SniperPost[] = [];
   const runwaySpawns: RunwaySpawn[] = [];
@@ -981,7 +992,7 @@ export function generateWorld(): World {
   const seamWalls = buildSeamCrossings(DISTRICT_SEAM_X, hills, lamps, roads);
 
   // --- Home base (large forward-operating airbase) near the south edge ----
-  const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads);
+  const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads, fuelTanks);
 
   // --- Three desert-rim outposts (前哨陣地) on raised terrain --------------
   // Forward fortified positions placed at the open outer edge of the map,
@@ -1048,6 +1059,7 @@ export function generateWorld(): World {
   for (const l of lamps) l.pos.y += groundAt(l.pos.x, l.pos.z);
   for (const pv of parkedVehicles) pv.pos.y += groundAt(pv.pos.x, pv.pos.z);
   for (const ct of containers) ct.pos.y += groundAt(ct.pos.x, ct.pos.z);
+  for (const ft of fuelTanks) ft.pos.y += groundAt(ft.pos.x, ft.pos.z);
 
   // Seat every road decal onto the terrain so the asphalt/concrete follows the
   // rolling ground instead of clipping through it or hovering above it. The
@@ -1089,6 +1101,7 @@ export function generateWorld(): World {
     hills,
     parkedVehicles,
     containers,
+    fuelTanks,
     outposts,
     sniperPosts,
     fountainPos: new THREE.Vector3(CITY_CENTER_X, 0, CITY_CENTER_Z),
@@ -1127,6 +1140,7 @@ function buildBaseCompound(
   lamps: Lamp[],
   crates: Crate[],
   roads: Road[],
+  fuelTanks: FuelTank[],
 ): Wall[] {
   const walls: Wall[] = [];
   const cx = BASE_POS.x;
@@ -1412,7 +1426,238 @@ function buildBaseCompound(
     }
   }
 
+  // --- Extra airfield detailing (fuel farm, fire station, GSE, lights …) --
+  // Pushes a much richer set of authentic airbase structures and ground
+  // equipment around the runway / taxiway / apron so the facility reads as a
+  // busy, lived-in operational base rather than a bare paved rectangle.
+  buildAirfieldDetails(rng, {
+    cx, cz, halfX, halfZ,
+    rwX, rwW, rwLen, taxiX, apronX, apronW, apronD,
+    Y_SURFACE, PAINT_Y, APRON_Y,
+  }, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads, walls, fuelTanks);
+
   return walls;
+}
+
+// Extra set-dressing for the fused airbase. All geometry is anchored to the
+// layout metrics computed in buildBaseCompound() so everything lines up with
+// the runway, taxiway and apron. Pure decoration + light cover; nothing here
+// changes gameplay spawns.
+interface AirfieldLayout {
+  cx: number; cz: number; halfX: number; halfZ: number;
+  rwX: number; rwW: number; rwLen: number;
+  taxiX: number; apronX: number; apronW: number; apronD: number;
+  Y_SURFACE: number; PAINT_Y: number; APRON_Y: number;
+}
+function buildAirfieldDetails(
+  rng: () => number,
+  L: AirfieldLayout,
+  buildings: Building[],
+  parkedVehicles: ParkedVehicle[],
+  containers: Container[],
+  barrels: Barrel[],
+  sandbags: Wall[],
+  lamps: Lamp[],
+  crates: Crate[],
+  roads: Road[],
+  walls: Wall[],
+  fuelTanks: FuelTank[],
+) {
+  const { cx, cz, halfX, halfZ, rwX, rwW, rwLen, taxiX, apronX, apronW, apronD, Y_SURFACE, PAINT_Y } = L;
+  const concrete = "#8f8a7e";
+  const concreteDark = "#736e62";
+  const metal = "#9aa0a4";
+
+  // ---------------------------------------------------------------------
+  // (A) FUEL FARM — a cluster of big cylindrical storage tanks inside a
+  //     bunded (low blast-wall) enclosure at the south-east corner, with a
+  //     pump shed and connecting pipe runs. Tanks are tall barrels.
+  // ---------------------------------------------------------------------
+  const fuelX = apronX + apronW / 2 - 26;
+  const fuelZ = cz + halfZ - 40;
+  // Containment berm (low wall ring) around the tank farm.
+  const bermW = 46, bermD = 30, bermH = 1.8, bt = 1.0;
+  walls.push({ pos: new THREE.Vector3(fuelX, bermH / 2, fuelZ - bermD / 2), size: new THREE.Vector3(bermW, bermH, bt), color: concreteDark, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(fuelX, bermH / 2, fuelZ + bermD / 2), size: new THREE.Vector3(bermW, bermH, bt), color: concreteDark, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(fuelX - bermW / 2, bermH / 2, fuelZ), size: new THREE.Vector3(bt, bermH, bermD), color: concreteDark, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(fuelX + bermW / 2, bermH / 2, fuelZ), size: new THREE.Vector3(bt, bermH, bermD), color: concreteDark, kind: "barrier" });
+  // Three big cylindrical fuel tanks in two rows inside the bund.
+  const tankCols = ["#d8d4c4", "#cfcbbb", "#c4c0b0"];
+  for (let i = 0; i < 3; i++) {
+    const tx = fuelX - bermW / 2 + 12 + i * 12;
+    fuelTanks.push({ pos: new THREE.Vector3(tx, 0, fuelZ - 4), radius: 4.4, height: 9, color: tankCols[i % 3] });
+    fuelTanks.push({ pos: new THREE.Vector3(tx, 0, fuelZ + 6), radius: 4.4, height: 9, color: tankCols[(i + 1) % 3] });
+  }
+  // Pump / control shed beside the farm.
+  const pumpShed = makeBuilding(rng, fuelX + bermW / 2 + 8, fuelZ, 10, 8, STOREY_HEIGHT);
+  buildings.push(pumpShed);
+  // A refueling bowser parked near the gate of the fuel farm.
+  parkedVehicles.push({ pos: new THREE.Vector3(fuelX - bermW / 2 - 10, 0, fuelZ - 8), yaw: Math.PI / 2, kind: "truck", color: "#6f6a4a" });
+
+  // ---------------------------------------------------------------------
+  // (B) FIRE / CRASH-RESCUE STATION — a low building with two engine bays
+  //     near the runway mid-point, with two crash trucks parked outside.
+  // ---------------------------------------------------------------------
+  const fireX = taxiX + 26;
+  const fireZ = cz - rwLen * 0.18;
+  const fireStn = makeBuilding(rng, fireX, fireZ, 22, 12, STOREY_HEIGHT * 1.4);
+  buildings.push(fireStn);
+  // Roll-up bay doors (lighter panels) facing the runway (-x side).
+  walls.push({ pos: new THREE.Vector3(fireX - 11.2, STOREY_HEIGHT * 0.7, fireZ - 5), size: new THREE.Vector3(0.3, STOREY_HEIGHT * 1.2, 7), color: "#b0432f", kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(fireX - 11.2, STOREY_HEIGHT * 0.7, fireZ + 5), size: new THREE.Vector3(0.3, STOREY_HEIGHT * 1.2, 7), color: "#b0432f", kind: "wall" });
+  for (const dz of [-5, 5]) {
+    parkedVehicles.push({ pos: new THREE.Vector3(fireX - 20, 0, fireZ + dz), yaw: -Math.PI / 2, kind: "truck", color: "#9c2f22" });
+  }
+
+  // ---------------------------------------------------------------------
+  // (C) WINDSOCK + segmented circle near the runway mid-point.
+  // ---------------------------------------------------------------------
+  const wsX = rwX - rwW / 2 - 14;
+  const wsZ = cz;
+  walls.push({ pos: new THREE.Vector3(wsX, 3.0, wsZ), size: new THREE.Vector3(0.3, 6.0, 0.3), color: "#dddddd", kind: "pillar" });
+  // Striped cone segments (orange/white) held aloft.
+  for (let s = 0; s < 4; s++) {
+    walls.push({
+      pos: new THREE.Vector3(wsX + 1.2 + s * 1.0, 5.6, wsZ),
+      size: new THREE.Vector3(1.0, 1.0 - s * 0.12, 1.0 - s * 0.12),
+      color: s % 2 ? "#e8e4d4" : "#e0631e",
+      kind: "barrier",
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // (D) APPROACH / RUNWAY EDGE LIGHTING — small light stubs marching down
+  //     both runway shoulders, plus a PAPI bar and an approach-light array
+  //     off each threshold so the strip reads as fully lit.
+  // ---------------------------------------------------------------------
+  const edgeN = 24;
+  for (let i = 0; i <= edgeN; i++) {
+    const lz = cz - rwLen / 2 + (i / edgeN) * rwLen;
+    for (const side of [-1, 1]) {
+      walls.push({
+        pos: new THREE.Vector3(rwX + side * (rwW / 2 + 2.0), 0.55, lz),
+        size: new THREE.Vector3(0.35, 1.1, 0.35),
+        color: side < 0 ? "#d8d2b0" : "#d8d2b0",
+        kind: "pillar",
+      });
+    }
+  }
+  // PAPI four-light bar to the left of each threshold.
+  for (const end of [-1, 1]) {
+    for (let k = 0; k < 4; k++) {
+      walls.push({
+        pos: new THREE.Vector3(rwX - rwW / 2 - 8 - k * 1.6, 0.5, cz + end * (rwLen / 2 - 30)),
+        size: new THREE.Vector3(1.1, 0.9, 1.1),
+        color: k < 2 ? "#d83a2a" : "#e8e8e0",
+        kind: "pillar",
+      });
+    }
+    // Approach-light bars marching beyond each threshold (off the paved end).
+    for (let a = 1; a <= 5; a++) {
+      walls.push({
+        pos: new THREE.Vector3(rwX, 0.45, cz + end * (rwLen / 2 + a * 8)),
+        size: new THREE.Vector3(rwW * 0.8, 0.6, 0.5),
+        color: "#e6e6d0",
+        kind: "barrier",
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // (E) HARDENED AIRCRAFT SHELTERS (HAS) — three arched revetment shelters
+  //     in a dispersal area west of the runway, each an open-fronted earth-
+  //     covered box that an aircraft would taxi into.
+  // ---------------------------------------------------------------------
+  const hasX = rwX - rwW / 2 - 46;
+  const hasCol = "#7e7a5e";
+  for (let i = 0; i < 3; i++) {
+    const hz = cz - rwLen * 0.28 + i * (rwLen * 0.28);
+    const sw = 22, sd = 18, sh = 9, st = 1.4;
+    // Back + two side walls (front open toward the runway, +x).
+    walls.push({ pos: new THREE.Vector3(hasX - sw / 2, sh / 2, hz), size: new THREE.Vector3(st, sh, sd), color: hasCol, kind: "wall" });
+    walls.push({ pos: new THREE.Vector3(hasX, sh / 2, hz - sd / 2), size: new THREE.Vector3(sw, sh, st), color: hasCol, kind: "wall" });
+    walls.push({ pos: new THREE.Vector3(hasX, sh / 2, hz + sd / 2), size: new THREE.Vector3(sw, sh, st), color: hasCol, kind: "wall" });
+    // Sloped earth-covered roof (a couple of stacked slabs to fake the arch).
+    walls.push({ pos: new THREE.Vector3(hasX, sh + 0.6, hz), size: new THREE.Vector3(sw + 1.5, 1.2, sd + 1.5), color: "#8a7a54", kind: "roof" });
+    walls.push({ pos: new THREE.Vector3(hasX, sh + 1.6, hz), size: new THREE.Vector3(sw * 0.7, 1.0, sd * 0.7), color: "#8a7a54", kind: "roof" });
+    // A short taxi-spur decal connecting the shelter mouth to the runway.
+    roads.push({ pos: new THREE.Vector3((hasX + rwX) / 2, Y_SURFACE, hz), size: new THREE.Vector3(rwX - hasX, 0.02, 8), color: "#3a3e44" });
+  }
+
+  // ---------------------------------------------------------------------
+  // (F) GROUND SUPPORT EQUIPMENT (GSE) scattered on the flight-line apron:
+  //     tow tractors, generator carts, stair trucks and stacked wheel
+  //     chocks / equipment crates between the parking rows.
+  // ---------------------------------------------------------------------
+  for (let i = 0; i < 8; i++) {
+    const gx = apronX - apronW / 2 + 20 + (i % 4) * 24 + (rng() - 0.5) * 6;
+    const gz = cz - apronD / 2 + 40 + Math.floor(i / 4) * 36 + (rng() - 0.5) * 6;
+    parkedVehicles.push({ pos: new THREE.Vector3(gx, 0, gz), yaw: rng() * Math.PI * 2, kind: "humvee", color: "#d6d000" });
+    // generator / GPU cart represented as a small crate cluster
+    crates.push({ pos: new THREE.Vector3(gx + 3, 0.7, gz + 2), size: 1.3, color: "#586b58" });
+    crates.push({ pos: new THREE.Vector3(gx + 4.4, 0.6, gz + 2), size: 1.0, color: "#4a5a4a" });
+  }
+  // Equipment / tool crates lined neatly along the hangar frontage.
+  for (let i = 0; i < 18; i++) {
+    const ex = apronX - apronW / 2 - 6;
+    const ez = cz - apronD / 2 + 30 + i * (apronD - 60) / 17;
+    crates.push({ pos: new THREE.Vector3(ex, 0.6, ez), size: 1.0 + (i % 3) * 0.15, color: i % 2 ? "#6b6240" : "#7a6a3a" });
+  }
+
+  // ---------------------------------------------------------------------
+  // (G) JERSEY-BARRIER lane dividers + bollards separating the taxiway from
+  //     the parking apron, guiding ground traffic.
+  // ---------------------------------------------------------------------
+  for (let i = 0; i < 14; i++) {
+    const bz = cz - apronD / 2 + 10 + i * (apronD - 20) / 13;
+    walls.push({ pos: new THREE.Vector3(taxiX + 30, 0.55, bz), size: new THREE.Vector3(1.0, 1.1, 3.2), color: "#c9c4b4", kind: "barrier" });
+  }
+
+  // ---------------------------------------------------------------------
+  // (H) SUPPORT BUILDINGS along the east wall — squadron ops / barracks /
+  //     workshop blocks, giving the base a populated cantonment edge.
+  // ---------------------------------------------------------------------
+  const opsX = cx + halfX - 30;
+  for (let i = 0; i < 4; i++) {
+    const oz = cz - halfZ + 60 + i * 70;
+    const w = 24 + (i % 2) * 8;
+    const d = 16;
+    const floors = 1 + (i % 2);
+    const b = makeBuilding(rng, opsX, oz, w, d, STOREY_HEIGHT * floors);
+    buildings.push(b);
+    // A lamp + a couple of parked support trucks out front.
+    lamps.push({ pos: new THREE.Vector3(opsX - w / 2 - 6, 0, oz) });
+    parkedVehicles.push({ pos: new THREE.Vector3(opsX - w / 2 - 12, 0, oz + 5), yaw: -Math.PI / 2, kind: "truck", color: "#5f6347" });
+  }
+
+  // ---------------------------------------------------------------------
+  // (I) COMMS / RADAR yard — a fenced patch near the control tower side
+  //     with a tall lattice antenna mast and a rotating-radar dish stub.
+  // ---------------------------------------------------------------------
+  const radarX = apronX + apronW / 2 - 14;
+  const radarZ = cz - apronD / 2 + 24;
+  // Tall lattice mast.
+  walls.push({ pos: new THREE.Vector3(radarX, 11, radarZ), size: new THREE.Vector3(0.6, 22, 0.6), color: metal, kind: "pillar" });
+  walls.push({ pos: new THREE.Vector3(radarX, 22.4, radarZ), size: new THREE.Vector3(0.25, 4, 0.25), color: "#cf3b2f", kind: "pillar" });
+  // Guy-anchor blocks around the mast.
+  for (let a = 0; a < 3; a++) {
+    const ga = a * (Math.PI * 2 / 3);
+    crates.push({ pos: new THREE.Vector3(radarX + Math.cos(ga) * 6, 0.4, radarZ + Math.sin(ga) * 6), size: 0.8, color: "#6a6a6a" });
+  }
+  // Squat radar plinth + dish.
+  walls.push({ pos: new THREE.Vector3(radarX + 10, 1.6, radarZ), size: new THREE.Vector3(3, 3.2, 3), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(radarX + 10, 4.0, radarZ), size: new THREE.Vector3(4.5, 0.5, 1.2), color: "#dcdce0", kind: "roof" });
+
+  // ---------------------------------------------------------------------
+  // (J) ARMING / HOLDING APRON markings near each runway end (run-up pads)
+  //     plus a couple of revetment blast walls for last-chance checks.
+  // ---------------------------------------------------------------------
+  for (const end of [-1, 1]) {
+    const padZ = cz + end * (rwLen / 2 - 70);
+    roads.push({ pos: new THREE.Vector3(taxiX, Y_SURFACE, padZ), size: new THREE.Vector3(26, 0.02, 26), color: "#3a3e44" });
+    roads.push({ pos: new THREE.Vector3(taxiX, PAINT_Y, padZ), size: new THREE.Vector3(22, 0.02, 0.5), color: "#d6b73c" });
+    sandbags.push({ pos: new THREE.Vector3(taxiX + 15, 1.6, padZ), size: new THREE.Vector3(1.0, 3.2, 12), color: "#8a8f86", kind: "barrier" });
+  }
 }
 
 // === DESERT-RIM OUTPOSTS (前哨陣地) =========================================
@@ -2117,6 +2362,14 @@ export function worldToBoxes(world: World): Box[] {
     boxes.push({
       min: new THREE.Vector3(c.pos.x - c.size.x / 2, c.pos.y, c.pos.z - c.size.z / 2),
       max: new THREE.Vector3(c.pos.x + c.size.x / 2, c.pos.y + c.size.y, c.pos.z + c.size.z / 2),
+    });
+  }
+  // Large fuel-farm storage tanks are solid (approximated as a square footprint
+  // sized to the tank radius).
+  for (const t of world.fuelTanks) {
+    boxes.push({
+      min: new THREE.Vector3(t.pos.x - t.radius, t.pos.y, t.pos.z - t.radius),
+      max: new THREE.Vector3(t.pos.x + t.radius, t.pos.y + t.height, t.pos.z + t.radius),
     });
   }
   const f = world.fountainPos;
