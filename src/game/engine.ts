@@ -64,6 +64,7 @@ export class GameEngine {
     vehicleGas?: boolean;
     vehicleBrake?: boolean;
     mapTogglePressed?: boolean;
+    viewTogglePressed?: boolean;
   };
   shootHeld = false;
   spawnPoints: SpawnPoint[] = [];
@@ -482,6 +483,17 @@ export class GameEngine {
       this.input.keys.delete("KeyG"); // consume
     }
 
+    // 乗り物搭乗中の視点切り替え (V): 三人称 ⇔ 一人称。航空機モードでは
+    // 下の return より前で処理する必要があるためここで処理する。
+    if (this.input.viewTogglePressed) {
+      this.input.viewTogglePressed = false;
+      this.input.keys.delete("KeyV");
+      if (this.playerIsMounted()) {
+        this.state.vehicleViewMode = this.state.vehicleViewMode === "third" ? "first" : "third";
+        store.emit();
+      }
+    }
+
     // While piloting an aircraft, the flight controller (updatePlayerAircraft)
     // owns the mouse delta + weapon firing, so skip the on-foot FPS handling.
     if (this.state.playerInAircraft) return;
@@ -569,7 +581,15 @@ export class GameEngine {
     if (!v || v.destroyed) return;
     this.state.playerInVehicle = v.id;
     v.team = "blue";
+    this.state.vehicleViewMode = "third"; // 搭乗時は三人称から開始
     soundEngine.playVehicleEnter();
+  }
+
+  // True while the player is riding any vehicle (ground or air). Used to make
+  // the player immune to small-arms / explosion damage that would otherwise be
+  // applied to player.pos (which tracks the vehicle while mounted).
+  private playerIsMounted(): boolean {
+    return this.state.playerInAircraft !== null || this.state.playerInVehicle !== null;
   }
 
   // === AIRCRAFT: PLAYER PILOTING ==========================================
@@ -598,8 +618,20 @@ export class GameEngine {
       if (dist < closestDist) { closestDist = dist; closest = ac; }
     }
     if (closest) {
+      // 搭乗時に飛行状態をリセットする。AI が操縦/滑走していた機体は速度や
+      // スロットルが残っており、プレイヤーが乗った瞬間に「速度が一瞬で
+      // 跳ね上がる」バグの原因になっていた。地上待機状態から開始させる。
+      closest.vel.set(0, 0, 0);
+      closest.throttle = 0;
+      closest.pitch = 0;
+      closest.roll = 0;
+      closest.onGround = true;
+      closest.aiState = "taxiing";
+      closest.aiTargetSoldierId = null;
+      closest.aiTargetPos = null;
       this.state.playerInAircraft = closest.id;
       this.state.playerInVehicle  = null; // 地上車両は降りる
+      this.state.vehicleViewMode  = "third"; // 搭乗時は三人称から開始
       soundEngine.playVehicleEnter();     // 搭乗音 (既存流用)
     }
   }
@@ -717,9 +749,16 @@ export class GameEngine {
       this.input.keys.delete("Space");
     }
 
-    // ── カメラ追従: player.pos を機体後方に置く ─────────
-    const back = fwd.clone().multiplyScalar(-14);
-    p.pos.set(ac.pos.x + back.x, ac.pos.y + 4, ac.pos.z + back.z);
+    // ── カメラ追従 ───────────────────────────────────
+    // 三人称: 機体後方上方からのチェイスカメラ。一人称: コクピット位置。
+    if (this.state.vehicleViewMode === "first") {
+      // 機首やや後方のコクピットに視点を置く。
+      const cockpit = fwd.clone().multiplyScalar(1.5);
+      p.pos.set(ac.pos.x + cockpit.x, ac.pos.y + 1.2, ac.pos.z + cockpit.z);
+    } else {
+      const back = fwd.clone().multiplyScalar(-14);
+      p.pos.set(ac.pos.x + back.x, ac.pos.y + 4, ac.pos.z + back.z);
+    }
     p.yaw   = ac.yaw;
     p.pitch = ac.pitch;
     p.vel.set(0, 0, 0);
@@ -1332,7 +1371,19 @@ export class GameEngine {
       : v.kind === "truck" ? 2.4
       : v.kind === "humvee" ? 2.0
       : 1.8;
-    p.pos.set(v.pos.x, v.pos.y + seatH, v.pos.z);
+    if (this.state.vehicleViewMode === "third") {
+      // 三人称: 車体後方上方からのチェイスカメラ。前進方向の逆へ下げる。
+      const fwdV = new THREE.Vector3(-Math.sin(v.yaw), 0, -Math.cos(v.yaw));
+      const dist = v.kind === "tank" ? 11 : v.kind === "apc" || v.kind === "truck" ? 10 : 8;
+      const height = v.kind === "tank" || v.kind === "apc" || v.kind === "truck" ? 5 : 4;
+      p.pos.set(
+        v.pos.x - fwdV.x * dist,
+        v.pos.y + seatH + height,
+        v.pos.z - fwdV.z * dist,
+      );
+    } else {
+      p.pos.set(v.pos.x, v.pos.y + seatH, v.pos.z);
+    }
     p.vel.set(0, 0, 0);
     p.onGround = true;
   }
@@ -1474,7 +1525,10 @@ export class GameEngine {
 
   private updateSoldiers(dt: number, time: number) {
     const p = this.state.player;
-    const playerAlive = p.hp > 0 && this.state.status === "playing";
+    // 搭乗中 (航空機・地上車両) のプレイヤーは敵歩兵の射撃対象にしない。
+    // 機体に追従する player.pos を撃たれてもダメージは無効化しているが、
+    // ターゲットからも外すことで無駄な被弾エフェクト/追尾を防ぐ。
+    const playerAlive = p.hp > 0 && this.state.status === "playing" && !this.playerIsMounted();
 
     for (const s of this.state.soldiers) {
       if (!s.alive) continue;
@@ -2087,6 +2141,10 @@ export class GameEngine {
       const isHead = Math.random() < (s.soldierClass === "sniper" ? 0.32 : 0.12);
       const dmg = (baseDmg + Math.random() * 5) * (isHead ? 2.2 : 1);
       if (target.isPlayer) {
+        // 搭乗中 (航空機・地上車両) は機体/車体に守られているため、
+        // 小火器のダメージは無効化する。これが「航空機に乗ると勝手に
+        // ダメージを受ける」バグの主因だった。
+        if (this.playerIsMounted()) return;
         this.state.player.hp -= dmg;
         this.state.player.lastDamagedAt = time;
         this.state.damageFlash = Math.min(0.7, 0.35 + dmg * 0.01);
@@ -2508,7 +2566,7 @@ export class GameEngine {
       }
     }
     const pd = this.state.player.pos.distanceTo(pos);
-    if (pd < radius) {
+    if (pd < radius && !this.playerIsMounted()) {
       const fall = 1 - pd / radius;
       this.state.player.hp -= damage * 0.5 * fall;
       this.state.player.lastDamagedAt = time;
@@ -2585,7 +2643,7 @@ export class GameEngine {
       }
     }
     const pd = this.state.player.pos.distanceTo(pos);
-    if (pd < GRENADE_RADIUS) {
+    if (pd < GRENADE_RADIUS && !this.playerIsMounted()) {
       const fall = 1 - pd / GRENADE_RADIUS;
       const dmg = 60 * fall;
       this.state.player.hp -= dmg;

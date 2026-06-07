@@ -20,6 +20,8 @@ export class Input {
   enterVehiclePressed = false;
   mapTogglePressed = false;
   aircraftEnterPressed = false;
+  // 乗り物搭乗中の視点切り替え (V): 三人称 ⇔ 一人称
+  viewTogglePressed = false;
 
   private el: HTMLElement;
   private onKey = (e: KeyboardEvent, down: boolean) => {
@@ -28,6 +30,7 @@ export class Input {
     if (down && e.code === "KeyE") this.pickupPressed = true;
     if (down && e.code === "KeyM") this.mapTogglePressed = true;
     if (down && e.code === "KeyG") this.aircraftEnterPressed = true;
+    if (down && e.code === "KeyV") this.viewTogglePressed = true;
   };
   private onMove = (e: MouseEvent) => {
     if (!this.locked) return;
@@ -92,6 +95,7 @@ export class Input {
   pressEnterVehicle() { this.enterVehiclePressed = true; }
   pressAircraftEnter() { this.aircraftEnterPressed = true; }
   pressMapToggle() { this.mapTogglePressed = true; }
+  pressViewToggle() { this.viewTogglePressed = true; }
   setVehicleGas(on: boolean) { this.vehicleGas = on; }
   setVehicleBrake(on: boolean) { this.vehicleBrake = on; }
 }

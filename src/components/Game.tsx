@@ -2642,6 +2642,8 @@ export default function Game() {
       get vehicleBrake() { return input.vehicleBrake; },
       get mapTogglePressed() { return input.mapTogglePressed; },
       set mapTogglePressed(v: boolean) { input.mapTogglePressed = v; },
+      get viewTogglePressed() { return input.viewTogglePressed; },
+      set viewTogglePressed(v: boolean) { input.viewTogglePressed = v; },
     } as any, sharedWorld);
     setEngine(eng);
   }, []);

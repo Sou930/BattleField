@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import * as THREE from "three";
 import { generateWorld } from "@/game/world";
 import { GameEngine } from "@/game/engine";
 import { createInitialState } from "@/game/store";
@@ -23,6 +24,7 @@ function makeControllableEngine() {
   let mouseDelta = { dx: 0, dy: 0 };
   const input: GameEngine["input"] & {
     aircraftEnterPressed: boolean;
+    viewTogglePressed: boolean;
     setMouseDelta: (dx: number, dy: number) => void;
   } = {
     keys: new Set<string>(),
@@ -33,6 +35,7 @@ function makeControllableEngine() {
     },
     mouse: { left: false, right: false },
     aircraftEnterPressed: false,
+    viewTogglePressed: false,
     setMouseDelta: (dx: number, dy: number) => { mouseDelta = { dx, dy }; },
   };
   const world = generateWorld();
@@ -243,5 +246,82 @@ describe("player aircraft piloting", () => {
 
     expect(ac.bombCount).toBe(bombsBefore - 1);
     expect(engine.state.aircraftBombs.length).toBeGreaterThan(0);
+  });
+});
+
+describe("aircraft bug fixes", () => {
+  it("boarding resets velocity/throttle so speed does not spike (speed bug)", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+
+    // Simulate an aircraft the AI had spun up: high residual velocity + throttle.
+    const ac = engine.state.aircraft[0];
+    ac.vel.set(0, 0, -200);
+    ac.throttle = 1;
+    ac.onGround = false;
+    ac.aiState = "attack";
+
+    // Stand next to it and board.
+    engine.state.player.pos.set(ac.pos.x + 2, 1.65, ac.pos.z);
+    // Put it back on the ground so it is boardable.
+    ac.onGround = true;
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+
+    expect(engine.state.playerInAircraft).toBe(ac.id);
+    // Speed/throttle must be reset on board — no instant velocity spike.
+    expect(ac.vel.length()).toBeCloseTo(0, 3);
+    expect(ac.throttle).toBe(0);
+    expect(ac.onGround).toBe(true);
+    expect(ac.aiState).toBe("taxiing");
+  });
+
+  it("player takes no grenade/bomb damage while piloting (damage bug)", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+    engine.state.soldiers.length = 0;
+
+    const ac = engine.state.aircraft[0];
+    engine.state.player.pos.set(ac.pos.x + 2, 1.65, ac.pos.z);
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+    expect(engine.state.playerInAircraft).toBe(ac.id);
+
+    const hpBefore = engine.state.player.hp;
+    // Detonate an aircraft bomb right where the plane (and thus player.pos) is.
+    (engine as unknown as {
+      aircraftExplode: (
+        pos: THREE.Vector3, time: number, team: string, radius: number, damage: number,
+      ) => void;
+    }).aircraftExplode(ac.pos.clone(), 2, "red", 30, 200);
+
+    // No damage applied while mounted.
+    expect(engine.state.player.hp).toBe(hpBefore);
+  });
+
+  it("defaults to third-person view on board and toggles with V", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+
+    const ac = engine.state.aircraft[0];
+    engine.state.player.pos.set(ac.pos.x + 2, 1.65, ac.pos.z);
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+
+    // Boarding starts in third-person.
+    expect(engine.state.vehicleViewMode).toBe("third");
+
+    // V toggles to first-person.
+    input.viewTogglePressed = true;
+    engine.update(0.016, 1.1);
+    expect(engine.state.vehicleViewMode).toBe("first");
+
+    // V again -> back to third-person.
+    input.viewTogglePressed = true;
+    engine.update(0.016, 1.2);
+    expect(engine.state.vehicleViewMode).toBe("third");
   });
 });
