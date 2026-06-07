@@ -61,6 +61,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
   const vehicles = useGame((s) => s.vehicles);
   const playerInVehicle = useGame((s) => s.playerInVehicle);
   const playerInAircraft = useGame((s) => s.playerInAircraft);
+  const vehicleViewMode = useGame((s) => s.vehicleViewMode);
   const aircraft = useGame((s) => s.aircraft);
   const playerClass = useGame((s) => s.loadout.soldierClass);
   const mapOpen = useGame((s) => s.mapOpen);
@@ -231,7 +232,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 rounded border border-[hsl(var(--ammo)/0.5)] bg-background/70 px-4 py-2 text-center backdrop-blur-sm">
           <div className="text-[10px] uppercase tracking-widest text-[hsl(var(--ammo))]">🚗 VEHICLE</div>
           <div className="text-[9px] text-muted-foreground mt-1">
-            {isMobile ? "左スティック:操縦 · EXIT:降車" : "WASD to drive · F to exit"}
+            {isMobile ? "左スティック:操縦 · VIEW:視点 · EXIT:降車" : "WASD to drive · V 視点切替 · F to exit"}
           </div>
         </div>
       )}
@@ -246,7 +247,12 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
       {/* 航空計器パネル（搭乗中のみ表示） */}
       {status === "playing" && myAircraft && (
         <div className="absolute bottom-4 left-4 w-52 bg-black/70 text-green-400 font-mono text-xs p-3 rounded border border-green-800">
-          <div className="text-green-300 mb-1 text-sm">✈ {myAircraft.kind.toUpperCase()}</div>
+          <div className="text-green-300 mb-1 text-sm flex items-center justify-between">
+            <span>✈ {myAircraft.kind.toUpperCase()}</span>
+            <span className="text-[9px] text-green-500 border border-green-700 rounded px-1">
+              {vehicleViewMode === "third" ? "三人称" : "一人称"}
+            </span>
+          </div>
           <div>SPD  {Math.round(myAircraft.vel.length() * 3.6)} km/h</div>
           <div>ALT  {Math.round(myAircraft.pos.y)} m</div>
           <div className="mt-1">
@@ -268,6 +274,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
             マウス 機首操作<br />
             左クリック 機関銃<br />
             {myAircraft.kind === "attacker" && (<>SPACE 爆弾投下<br /></>)}
+            V 視点切替<br />
             G 脱出
           </div>
         </div>
@@ -481,6 +488,15 @@ function MobileControls({
           onPointerDown={() => { if (input?.current) input.current.aircraftEnterPressed = true; }}
         >
           ✈
+        </button>
+      )}
+      {/* 視点切り替えボタン (車両・航空機 搭乗中のみ) */}
+      {(inVehicle || inAircraft) && (
+        <button
+          className="pointer-events-auto absolute right-20 bottom-40 w-14 h-14 rounded-full bg-sky-700/80 text-white text-xs font-bold flex items-center justify-center active:bg-sky-500"
+          onPointerDown={() => { if (input?.current) input.current.viewTogglePressed = true; }}
+        >
+          VIEW
         </button>
       )}
       {/* Movement joystick (left) - works for both on-foot and vehicle */}

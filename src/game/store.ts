@@ -58,6 +58,10 @@ export interface GameState {
   nextDestructibleId: number;
   aiming: boolean;
   aimT: number;
+  // 乗り物 (航空機・地上車両) 搭乗中のカメラ視点。
+  //  "third" = 三人称 (機体/車体を後方から見る), "first" = 一人称 (コクピット視点)。
+  // 搭乗時は既定で三人称。V キーでトグルする。
+  vehicleViewMode: "first" | "third";
   nearbyPickupId: number | null;
   nearbyVehicleId: number | null;
   enemies: Soldier[];
@@ -130,6 +134,7 @@ export function createInitialState(): GameState {
     nextDestructibleId: 1,
     aiming: false,
     aimT: 0,
+    vehicleViewMode: "third",
     nearbyPickupId: null,
     nearbyVehicleId: null,
     enemies: soldiers,
