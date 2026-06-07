@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Soldier, MuzzleFlash, BulletHit, BulletTrail, Grenade, Explosion, DamageNumber, WeaponState, Pickup, WeaponId, SmokeCloud, DestructibleObject, RagdollPart, Loadout, CapturePoint, Vehicle } from "./types";
+import { Soldier, MuzzleFlash, BulletHit, BulletTrail, Grenade, Explosion, DamageNumber, WeaponState, Pickup, WeaponId, SmokeCloud, DestructibleObject, RagdollPart, Loadout, CapturePoint, Vehicle, Aircraft, AircraftBomb, AircraftGunTrail } from "./types";
 import { makeWeaponState, WEAPONS } from "./weapons";
 
 export interface PlayerState {
@@ -32,6 +32,12 @@ export interface GameState {
   capturePoints: CapturePoint[];
   vehicles: Vehicle[];
   playerInVehicle: number | null; // vehicle id
+  aircraft: Aircraft[];
+  aircraftBombs: AircraftBomb[];
+  aircraftGunTrails: AircraftGunTrail[];
+  playerInAircraft: number | null;  // aircraft.id
+  nextAircraftId: number;
+  nextAircraftBombId: number;
   score: number;
   kills: number;
   deaths: number;
@@ -98,6 +104,12 @@ export function createInitialState(): GameState {
     capturePoints: [],
     vehicles: [],
     playerInVehicle: null,
+    aircraft: [],
+    aircraftBombs: [],
+    aircraftGunTrails: [],
+    playerInAircraft: null,
+    nextAircraftId: 1,
+    nextAircraftBombId: 1,
     score: 0,
     kills: 0,
     deaths: 0,

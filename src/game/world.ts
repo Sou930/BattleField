@@ -550,6 +550,12 @@ export interface World {
   sniperPosts: SniperPost[];
   fountainPos: THREE.Vector3;
   basePos: THREE.Vector3;
+  runwaySpawns: RunwaySpawn[];
+}
+
+export interface RunwaySpawn {
+  pos: THREE.Vector3;   // 滑走路上の待機位置 (y=0)
+  yaw: number;          // 離陸方向
 }
 
 export function generateWorld(): World {
@@ -571,6 +577,7 @@ export function generateWorld(): World {
   const containers: Container[] = [];
   const outposts: Outpost[] = [];
   const sniperPosts: SniperPost[] = [];
+  const runwaySpawns: RunwaySpawn[] = [];
 
   // ======================================================================
   //  FUSED NELLIS AIRBASE  (west half) — built in buildBaseCompound()
@@ -1051,6 +1058,16 @@ export function generateWorld(): World {
     r.pos.y = groundAt(r.pos.x, r.pos.z) + Math.max(0.02, r.pos.y);
   }
 
+  // === Aircraft runway spawn points =====================================
+  // 滑走路は rwX (= AIRFIELD_CENTER_X - BASE_HALF_X * 0.46 ≈ -475),
+  // 南端 / 中央 / 北端 に3機を等間隔で並べる。すべて北向き (yaw=0) に配置。
+  const RW_X = AIRFIELD_CENTER_X - BASE_HALF_X * 0.46;
+  runwaySpawns.push(
+    { pos: new THREE.Vector3(RW_X - 8, 0.5, AIRFIELD_CENTER_Z + BASE_HALF_Z * 0.5), yaw: 0 },  // 南
+    { pos: new THREE.Vector3(RW_X,     0.5, AIRFIELD_CENTER_Z),                      yaw: 0 },  // 中央
+    { pos: new THREE.Vector3(RW_X + 8, 0.5, AIRFIELD_CENTER_Z - BASE_HALF_Z * 0.5), yaw: 0 },  // 北
+  );
+
   return {
     buildings,
     walls,
@@ -1072,6 +1089,7 @@ export function generateWorld(): World {
     sniperPosts,
     fountainPos: new THREE.Vector3(CITY_CENTER_X, 0, CITY_CENTER_Z),
     basePos: BASE_POS.clone(),
+    runwaySpawns,
   };
 }
 

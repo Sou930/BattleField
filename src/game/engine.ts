@@ -3,7 +3,7 @@ import { GameState, store } from "./store";
 import type { World } from "./world";
 import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS, BASE_HALF_Z } from "./world";
 import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, makeWeaponState } from "./weapons";
-import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass, SpawnPoint } from "./types";
+import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass, SpawnPoint, Aircraft } from "./types";
 import { CLASSES } from "./classes";
 import { soundEngine } from "./sound";
 
@@ -22,6 +22,22 @@ const PICKUP_RANGE = 1.8;
 const VEHICLE_ENTER_RANGE = 4.0;
 const CAPTURE_RADIUS = 12;
 const CAPTURE_SPEED = 0.18;
+
+// === AIRCRAFT TUNING =======================================================
+const AIRCRAFT_GRAVITY       = 12;    // 失速時の降下力
+const AIRCRAFT_LIFT_SPEED    = 60;    // この速度以上で揚力発生 (m/s)
+const AIRCRAFT_STALL_SPEED   = 40;    // この速度未満で失速
+const AIRCRAFT_MAX_SPEED     = 220;   // 最高速 fighter
+const AIRCRAFT_ATK_MAX_SPEED = 160;   // 最高速 attacker
+const AIRCRAFT_GUN_RANGE     = 600;   // 機関銃有効射程
+const AIRCRAFT_GUN_RPM       = 1200;  // 発射レート (rounds/min)
+const AIRCRAFT_GUN_DAMAGE    = 18;
+const AIRCRAFT_BOMB_RADIUS   = 28;    // 爆弾爆発半径
+const AIRCRAFT_BOMB_DAMAGE   = 180;
+const AIRCRAFT_HP_FIGHTER    = 180;
+const AIRCRAFT_HP_ATTACKER   = 240;
+const AIRCRAFT_RESPAWN_DELAY = 10;    // 着陸後の再出撃までの秒数
+const AIRCRAFT_GUN_RELOAD    = 3;     // 弾切れ後の補充までの秒数
 
 // Reusable temp vectors to reduce allocations in hot paths
 const _tmpV1 = new THREE.Vector3();
@@ -214,6 +230,7 @@ export class GameEngine {
 
     this.spawnCapturePoints();
     this.spawnVehicles();
+    this.spawnAircraft();
   }
 
   // Static metadata for the selectable spawn points, ordered rear → front.
@@ -403,6 +420,8 @@ export class GameEngine {
     this.updatePickups();
     this.updateCapturePoints(dt, time);
     this.updateVehicles(dt);
+    this.updateAircraft(dt, time);
+    this.updateAircraftBombs(dt, time);
     this.updateMatch();
 
     // Medic heal aura
@@ -1978,6 +1997,373 @@ export class GameEngine {
     this.state.ragdolls = this.state.ragdolls.filter((r) => r.ttl > 0);
   }
 
+  // === AIRCRAFT ============================================================
+  // Spawn the friendly air wing onto the runway: two fighters + one attacker,
+  // parked (onGround) on the three runway spawn slots, ready to taxi & launch.
+  private spawnAircraft() {
+    const spawns = this.world.runwaySpawns ?? [];
+    for (let i = 0; i < spawns.length; i++) {
+      const sp = spawns[i];
+      const kind = i === 2 ? "attacker" : "fighter";
+      const hpMax = kind === "attacker" ? AIRCRAFT_HP_ATTACKER : AIRCRAFT_HP_FIGHTER;
+      const ac: Aircraft = {
+        id: this.state.nextAircraftId++,
+        kind,
+        team: "blue",
+        pos: sp.pos.clone(),
+        vel: new THREE.Vector3(),
+        yaw: sp.yaw,
+        pitch: 0,
+        roll: 0,
+        hp: hpMax,
+        hpMax,
+        alive: true,
+        onGround: true,
+        throttle: 0,
+        lastGunAt: -10,
+        gunAmmo: 500,
+        gunAmmoMax: 500,
+        bombCount: kind === "attacker" ? 4 : 0,
+        bombMax: 4,
+        lastBombAt: -10,
+        aiState: "taxiing",
+        aiTargetPos: null,
+        aiTargetSoldierId: null,
+        aiTimer: 0,
+        engineSmoke: false,
+      };
+      this.state.aircraft.push(ac);
+    }
+  }
+
+  // Per-frame flight, AI and weapon update for every (AI controlled) aircraft.
+  private updateAircraft(dt: number, time: number) {
+    for (const ac of this.state.aircraft) {
+      // 1. The player-piloted plane is driven elsewhere; skip it here.
+      if (this.state.playerInAircraft === ac.id) continue;
+      if (!ac.alive) continue;
+
+      ac.aiTimer -= dt;
+
+      const maxSpeed = ac.kind === "attacker" ? AIRCRAFT_ATK_MAX_SPEED : AIRCRAFT_MAX_SPEED;
+
+      // Simple gun reload: top the magazine back up a few seconds after it runs dry.
+      if (ac.gunAmmo <= 0 && time - ac.lastGunAt > AIRCRAFT_GUN_RELOAD) {
+        ac.gunAmmo = ac.gunAmmoMax;
+      }
+
+      // Smoke trail once badly damaged.
+      ac.engineSmoke = ac.hp < ac.hpMax * 0.4;
+
+      // 4. Grounded aircraft: taxi/launch logic & respawn timer.
+      if (ac.onGround) {
+        // Spin up the engine and roll forward; once we reach lift speed, climb out.
+        ac.throttle = Math.min(1, ac.throttle + dt * 0.4);
+        if (ac.aiState === "taxiing") {
+          // Wait a short beat, then begin the takeoff roll.
+          if (ac.aiTimer <= 0) {
+            ac.aiState = "takeoff";
+            ac.aiTimer = 0;
+          }
+        }
+        if (ac.aiState === "takeoff") {
+          // Accelerate down the runway along the heading.
+          const fwd = _tmpV1.set(Math.sin(ac.yaw), 0, Math.cos(ac.yaw));
+          ac.vel.addScaledVector(fwd, maxSpeed * ac.throttle * dt * 1.5);
+          ac.vel.y = 0;
+          ac.pos.addScaledVector(ac.vel, dt);
+          // Rotate forward speed (horizontal magnitude) determines lift-off.
+          const groundSpeed = Math.hypot(ac.vel.x, ac.vel.z);
+          if (groundSpeed >= AIRCRAFT_LIFT_SPEED) {
+            ac.onGround = false;
+            ac.pitch = 0.25;
+            ac.aiState = "patrol";
+            ac.aiTimer = 4 + Math.random() * 4;
+            ac.pos.y = Math.max(ac.pos.y, 2);
+          }
+        }
+        // While parked, occasionally schedule a (re)launch.
+        if (ac.aiState === "landing") {
+          // Has landed; sit on the deck and respawn after the delay.
+          if (ac.aiTimer <= 0) {
+            this.resetAircraftToRunway(ac);
+          }
+        }
+        continue;
+      }
+
+      // 3a. Airborne thrust: accelerate along the current heading/pitch.
+      const dir = _tmpV1.set(
+        Math.sin(ac.yaw) * Math.cos(ac.pitch),
+        Math.sin(ac.pitch),
+        Math.cos(ac.yaw) * Math.cos(ac.pitch),
+      );
+      // Steer the velocity toward the facing direction at the desired throttle.
+      const targetSpeed = maxSpeed * Math.max(0.4, ac.throttle);
+      _tmpV2.copy(dir).multiplyScalar(targetSpeed);
+      ac.vel.lerp(_tmpV2, Math.min(1, dt * 1.2));
+
+      // 3b. Lift vs. gravity: below lift speed the plane sinks (and stalls).
+      const speed = ac.vel.length();
+      if (speed >= AIRCRAFT_LIFT_SPEED) {
+        // Enough airflow: cancel most of gravity (level flight).
+        ac.vel.y += AIRCRAFT_GRAVITY * dt * 0.85;
+      } else {
+        // Stalling / sluggish: pull the nose & the plane down.
+        ac.vel.y -= AIRCRAFT_GRAVITY * dt;
+        if (speed < AIRCRAFT_STALL_SPEED) ac.pitch = Math.max(-0.6, ac.pitch - dt * 0.5);
+      }
+
+      // 3c. Integrate position.
+      ac.pos.addScaledVector(ac.vel, dt);
+
+      // AI behaviour state machine.
+      this.updateAircraftAI(ac, dt, time);
+
+      // Keep the plane inside the world bounds: bank back toward center.
+      const lim = WORLD_SIZE / 2 - 40;
+      if (Math.abs(ac.pos.x) > lim || Math.abs(ac.pos.z) > lim) {
+        const toCenter = Math.atan2(-ac.pos.x, -ac.pos.z);
+        ac.yaw += this.angleTowards(ac.yaw, toCenter) * Math.min(1, dt * 1.5);
+      }
+
+      // Update display roll from how hard we are turning.
+      ac.roll = THREE.MathUtils.clamp(ac.roll * 0.9, -1, 1);
+
+      // 3d. Touched the ground → treat as a landing.
+      if (ac.pos.y <= 0.5) {
+        ac.pos.y = 0.5;
+        ac.onGround = true;
+        ac.alive = true;
+        ac.vel.set(0, 0, 0);
+        ac.pitch = 0;
+        ac.roll = 0;
+        ac.aiState = "landing";
+        ac.aiTimer = AIRCRAFT_RESPAWN_DELAY;
+      }
+    }
+  }
+
+  // Airborne decision making: pick a patrol altitude, hunt enemy soldiers,
+  // dive to strafe with guns, or (attackers) drop bombs on a target.
+  private updateAircraftAI(ac: Aircraft, dt: number, time: number) {
+    // Acquire / refresh a ground target every couple of seconds.
+    if (ac.aiTimer <= 0) {
+      const target = this.findAircraftTarget(ac);
+      if (target) {
+        ac.aiTargetSoldierId = target.id;
+        ac.aiTargetPos = target.pos.clone();
+        ac.aiState = ac.kind === "attacker" && ac.bombCount > 0 ? "strafe" : "attack";
+      } else {
+        ac.aiTargetSoldierId = null;
+        ac.aiState = "patrol";
+      }
+      ac.aiTimer = 2 + Math.random() * 2;
+    }
+
+    if (ac.aiState === "patrol") {
+      // Cruise at a random comfortable altitude (80–250m), gentle turns.
+      const wantY = 80 + ((ac.id * 53) % 170);
+      ac.pitch += (THREE.MathUtils.clamp((wantY - ac.pos.y) * 0.01, -0.4, 0.4) - ac.pitch) * Math.min(1, dt * 2);
+      ac.throttle = 0.85;
+      // Lazy wandering turn.
+      ac.yaw += Math.sin(time * 0.2 + ac.id) * dt * 0.2;
+    } else if (ac.aiState === "attack" || ac.aiState === "strafe") {
+      const tgt = ac.aiTargetSoldierId != null ? this.state.soldiers.find((s) => s.id === ac.aiTargetSoldierId && s.alive) : undefined;
+      if (!tgt) {
+        ac.aiState = "patrol";
+        ac.aiTimer = 0;
+      } else {
+        // Aim the nose at the target: yaw toward it, dive at it.
+        const toYaw = Math.atan2(tgt.pos.x - ac.pos.x, tgt.pos.z - ac.pos.z);
+        ac.yaw += this.angleTowards(ac.yaw, toYaw) * Math.min(1, dt * 2);
+        const dx = tgt.pos.x - ac.pos.x;
+        const dz = tgt.pos.z - ac.pos.z;
+        const horiz = Math.hypot(dx, dz);
+        const wantPitch = Math.atan2(tgt.pos.y - ac.pos.y, Math.max(1, horiz));
+        ac.pitch += (THREE.MathUtils.clamp(wantPitch, -0.7, 0.5) - ac.pitch) * Math.min(1, dt * 2);
+        ac.throttle = 1;
+        ac.roll = THREE.MathUtils.clamp(this.angleTowards(ac.yaw, toYaw) * 4, -1, 1);
+
+        if (ac.aiState === "attack") {
+          this.attackWithGun(ac, time);
+        } else {
+          // Attacker: release a bomb when roughly overhead and reasonably low.
+          if (ac.bombCount > 0 && horiz < 60 && ac.pos.y < 160 && time - ac.lastBombAt > 1.2) {
+            this.dropBomb(ac);
+          }
+          // Also strafe with guns on the run-in.
+          this.attackWithGun(ac, time);
+          if (ac.bombCount <= 0) ac.aiState = "attack";
+        }
+
+        // Don't fly into the deck while diving: pull up if too low.
+        if (ac.pos.y < 40) ac.pitch = Math.max(ac.pitch, 0.15);
+      }
+    }
+  }
+
+  // Find the nearest living enemy (red) soldier for an aircraft to engage.
+  private findAircraftTarget(ac: Aircraft): Soldier | null {
+    let best: Soldier | null = null;
+    let bestD = Infinity;
+    const enemyTeam: Team = ac.team === "blue" ? "red" : "blue";
+    for (const s of this.state.soldiers) {
+      if (!s.alive || s.team !== enemyTeam) continue;
+      const d = s.pos.distanceTo(ac.pos);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best;
+  }
+
+  // Fire the nose machine gun at the current target if in range & off cooldown.
+  private attackWithGun(ac: Aircraft, time: number) {
+    if (ac.gunAmmo <= 0) return;
+    const tgt = ac.aiTargetSoldierId != null ? this.state.soldiers.find((s) => s.id === ac.aiTargetSoldierId && s.alive) : undefined;
+    if (!tgt) return;
+    const dist = tgt.pos.distanceTo(ac.pos);
+    if (dist > AIRCRAFT_GUN_RANGE) return;
+    const interval = 60 / AIRCRAFT_GUN_RPM;
+    if (time - ac.lastGunAt < interval) return;
+
+    ac.lastGunAt = time;
+    ac.gunAmmo -= 1;
+
+    // Tracer from the nose to the target.
+    const from = ac.pos.clone();
+    const to = tgt.pos.clone();
+    this.state.aircraftGunTrails.push({ from, to, ttl: 0.08 });
+
+    // Apply damage with some spread/variance.
+    const dmg = AIRCRAFT_GUN_DAMAGE * (0.7 + Math.random() * 0.6);
+    tgt.hp -= dmg;
+    if (ac.team === "blue") this.state.score += 50;
+    if (tgt.hp <= 0 && tgt.alive) {
+      tgt.alive = false;
+      if (ac.team === "blue" && tgt.team === "red") {
+        this.state.kills += 1;
+        this.state.score += 120;
+        this.state.blueScore += 1;
+      } else if (tgt.team === "blue") {
+        this.state.redScore += 1;
+      }
+      this.spawnRagdoll(tgt);
+    }
+  }
+
+  // Release a free-falling bomb that keeps the plane's forward inertia.
+  private dropBomb(ac: Aircraft) {
+    if (ac.bombCount <= 0) return;
+    const vel = ac.vel.clone();
+    vel.y -= 5; // small downward kick at release
+    this.state.aircraftBombs.push({
+      id: this.state.nextAircraftBombId++,
+      pos: ac.pos.clone(),
+      vel,
+      team: ac.team,
+      exploded: false,
+      fromAircraftId: ac.id,
+    });
+    ac.bombCount -= 1;
+    ac.lastBombAt = performance.now() / 1000;
+  }
+
+  // Integrate dropped bombs under gravity and detonate them on impact.
+  private updateAircraftBombs(dt: number, time: number) {
+    for (const b of this.state.aircraftBombs) {
+      if (b.exploded) continue;
+      b.vel.y -= AIRCRAFT_GRAVITY * dt;
+      b.pos.addScaledVector(b.vel, dt);
+      if (b.pos.y <= 0.2) {
+        b.pos.y = 0.2;
+        b.exploded = true;
+        this.aircraftExplode(b.pos, time, b.team, AIRCRAFT_BOMB_RADIUS, AIRCRAFT_BOMB_DAMAGE);
+      }
+    }
+    this.state.aircraftBombs = this.state.aircraftBombs.filter((b) => !b.exploded);
+  }
+
+  // Parametrised explosion used by aircraft bombs (larger radius/damage than a
+  // hand grenade). Mirrors explode() but with caller-supplied radius & damage.
+  private aircraftExplode(pos: THREE.Vector3, time: number, team: Team, radius: number, damage: number) {
+    this.state.explosions.push({ pos: pos.clone(), age: 0, ttl: 0.9 });
+    this.state.shake = Math.min(0.9, this.state.shake + 0.45);
+    soundEngine.playExplosion();
+    for (const e of this.state.soldiers) {
+      if (!e.alive) continue;
+      const d = e.pos.distanceTo(pos);
+      if (d < radius) {
+        const fall = 1 - d / radius;
+        e.hp -= damage * fall;
+        if (e.hp <= 0 && e.alive) {
+          e.alive = false;
+          if (team === "blue" && e.team === "red") {
+            this.state.kills += 1;
+            this.state.score += 120;
+            this.state.blueScore += 1;
+          } else if (e.team === "blue") {
+            this.state.redScore += 1;
+          }
+          this.spawnRagdoll(e);
+        }
+      }
+    }
+    for (const d of this.state.destructibles) {
+      if (d.destroyed) continue;
+      const dist = d.pos.distanceTo(pos);
+      if (dist < radius) {
+        d.hp -= 120 * (1 - dist / radius);
+        if (d.hp <= 0) {
+          d.destroyed = true;
+          this.spawnDebris(d);
+        }
+      }
+    }
+    const pd = this.state.player.pos.distanceTo(pos);
+    if (pd < radius) {
+      const fall = 1 - pd / radius;
+      this.state.player.hp -= damage * 0.5 * fall;
+      this.state.player.lastDamagedAt = time;
+      this.state.damageFlash = 0.7;
+      soundEngine.playDamage();
+    }
+  }
+
+  // Recycle a landed/destroyed aircraft back onto its runway slot, rearmed.
+  private resetAircraftToRunway(ac: Aircraft) {
+    const spawns = this.world.runwaySpawns ?? [];
+    if (spawns.length === 0) return;
+    // Keep the plane on its original slot (id-1 maps to spawn index).
+    const sp = spawns[(ac.id - 1) % spawns.length];
+    ac.pos.copy(sp.pos);
+    ac.yaw = sp.yaw;
+    ac.vel.set(0, 0, 0);
+    ac.pitch = 0;
+    ac.roll = 0;
+    ac.hp = ac.hpMax;
+    ac.alive = true;
+    ac.onGround = true;
+    ac.throttle = 0;
+    ac.gunAmmo = ac.gunAmmoMax;
+    ac.bombCount = ac.bombMax > 0 && ac.kind === "attacker" ? ac.bombMax : 0;
+    ac.engineSmoke = false;
+    ac.aiState = "taxiing";
+    ac.aiTargetSoldierId = null;
+    ac.aiTargetPos = null;
+    ac.aiTimer = 1 + Math.random() * 2;
+  }
+
+  // Smallest signed angle delta to rotate `from` toward `to` (radians).
+  private angleTowards(from: number, to: number): number {
+    let d = to - from;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d;
+  }
+
   private explode(pos: THREE.Vector3, time: number, throwerTeam: Team) {
     this.state.explosions.push({ pos: pos.clone(), age: 0, ttl: 0.7 });
     this.state.shake = Math.min(0.7, this.state.shake + 0.3);
@@ -2029,6 +2415,8 @@ export class GameEngine {
     this.state.hits = this.state.hits.filter((h) => h.ttl > 0);
     for (const t of this.state.trails) t.ttl -= dt;
     this.state.trails = this.state.trails.filter((t) => t.ttl > 0);
+    for (const gt of this.state.aircraftGunTrails) gt.ttl -= dt;
+    this.state.aircraftGunTrails = this.state.aircraftGunTrails.filter((gt) => gt.ttl > 0);
     for (const e of this.state.explosions) e.age += dt;
     this.state.explosions = this.state.explosions.filter((e) => e.age < e.ttl);
     for (const d of this.state.damageNumbers) {

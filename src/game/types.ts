@@ -211,3 +211,54 @@ export interface Vehicle {
   team: Team | null;
   destroyed: boolean;
 }
+
+// === AIRCRAFT ===
+export type AircraftKind = "fighter" | "attacker";
+// fighter = ドッグファイト特化 (高速/高機動/機関銃)
+// attacker = 近接支援特化 (爆弾/ロケット搭載/低速)
+
+export interface Aircraft {
+  id: number;
+  kind: AircraftKind;
+  team: Team;
+  pos: THREE.Vector3;      // 現在位置 (y=高度)
+  vel: THREE.Vector3;      // 速度ベクトル
+  yaw: number;             // 水平向き (ラジアン)
+  pitch: number;           // 仰角 (-PI/2 〜 PI/2)
+  roll: number;            // バンク角 (表示用)
+  hp: number;
+  hpMax: number;
+  alive: boolean;
+  onGround: boolean;       // 滑走路上で待機中
+  throttle: number;        // 0〜1 エンジン出力
+  // 機関銃
+  lastGunAt: number;
+  gunAmmo: number;
+  gunAmmoMax: number;
+  // 爆弾 (attackerのみ)
+  bombCount: number;
+  bombMax: number;
+  lastBombAt: number;
+  // AI用
+  aiState: "taxiing" | "takeoff" | "patrol" | "attack" | "strafe" | "returning" | "landing";
+  aiTargetPos: THREE.Vector3 | null;
+  aiTargetSoldierId: number | null;
+  aiTimer: number;
+  // エンジン音・エフェクト
+  engineSmoke: boolean;    // 被弾時の黒煙フラグ
+}
+
+export interface AircraftBomb {
+  id: number;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  team: Team;
+  exploded: boolean;
+  fromAircraftId: number;
+}
+
+export interface AircraftGunTrail {
+  from: THREE.Vector3;
+  to: THREE.Vector3;
+  ttl: number;
+}
