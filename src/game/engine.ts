@@ -2239,7 +2239,9 @@ export class GameEngine {
         aiState: "taxiing",
         aiTargetPos: null,
         aiTargetSoldierId: null,
-        aiTimer: 0,
+        // AI機は絶対に自動離陸しない。タイマーを大きな値 (999) で初期化して
+        // taxiing→takeoff へ遷移しないようにし、滑走路南端で静止待機させる。
+        aiTimer: 999,
         engineSmoke: false,
       };
       this.state.aircraft.push(ac);
@@ -2255,8 +2257,6 @@ export class GameEngine {
 
       ac.aiTimer -= dt;
 
-      const maxSpeed = ac.kind === "attacker" ? AIRCRAFT_ATK_MAX_SPEED : AIRCRAFT_MAX_SPEED;
-
       // Simple gun reload: top the magazine back up a few seconds after it runs dry.
       if (ac.gunAmmo <= 0 && time - ac.lastGunAt > AIRCRAFT_GUN_RELOAD) {
         ac.gunAmmo = ac.gunAmmoMax;
@@ -2265,82 +2265,38 @@ export class GameEngine {
       // Smoke trail once badly damaged.
       ac.engineSmoke = ac.hp < ac.hpMax * 0.4;
 
-      // 4. Grounded aircraft: taxi/launch logic & respawn timer.
+      // 4. Grounded aircraft: AI機は絶対に自動離陸しない。
+      //    滑走路南端で静止待機し、プレイヤーが搭乗した機体だけが飛ぶ。
       if (ac.onGround) {
-        // Spin up the engine and roll forward; once we reach lift speed, climb out.
-        ac.throttle = Math.min(1, ac.throttle + dt * 0.4);
-        if (ac.aiState === "taxiing") {
-          // Wait a short beat, then begin the takeoff roll.
-          if (ac.aiTimer <= 0) {
-            ac.aiState = "takeoff";
-            ac.aiTimer = 0;
-          }
-        }
-        if (ac.aiState === "takeoff") {
-          // Accelerate down the runway along the heading.
-          const fwd = _tmpV1.set(Math.sin(ac.yaw), 0, Math.cos(ac.yaw));
-          ac.vel.addScaledVector(fwd, maxSpeed * ac.throttle * dt * 1.5);
-          ac.vel.y = 0;
-          ac.pos.addScaledVector(ac.vel, dt);
-          // Rotate forward speed (horizontal magnitude) determines lift-off.
-          const groundSpeed = Math.hypot(ac.vel.x, ac.vel.z);
-          if (groundSpeed >= AIRCRAFT_LIFT_SPEED) {
-            ac.onGround = false;
-            ac.pitch = 0.25;
-            ac.aiState = "patrol";
-            ac.aiTimer = 4 + Math.random() * 4;
-            ac.pos.y = Math.max(ac.pos.y, 2);
-          }
-        }
-        // While parked, occasionally schedule a (re)launch.
-        if (ac.aiState === "landing") {
-          // Has landed; sit on the deck and respawn after the delay.
-          if (ac.aiTimer <= 0) {
-            this.resetAircraftToRunway(ac);
-          }
+        // 地上では絶対に動かない: スロットルと速度を毎フレーム 0 に固定する。
+        ac.throttle = 0;
+        ac.vel.set(0, 0, 0);
+        // 撃墜・着陸後の機体のみ、AIRCRAFT_RESPAWN_DELAY 経過で元位置へ戻す。
+        if (ac.aiState === "landing" && ac.aiTimer <= 0) {
+          this.resetAircraftToRunway(ac);
         }
         continue;
       }
 
-      // 3a. Airborne thrust: accelerate along the current heading/pitch.
-      const dir = _tmpV1.set(
-        Math.sin(ac.yaw) * Math.cos(ac.pitch),
-        Math.sin(ac.pitch),
-        Math.cos(ac.yaw) * Math.cos(ac.pitch),
-      );
-      // Steer the velocity toward the facing direction at the desired throttle.
-      const targetSpeed = maxSpeed * Math.max(0.4, ac.throttle);
-      _tmpV2.copy(dir).multiplyScalar(targetSpeed);
-      ac.vel.lerp(_tmpV2, Math.min(1, dt * 1.2));
+      // 3. Airborne AI機: これはプレイヤーが空中で脱出した機体だけが該当する。
+      //    AI 戦術行動 (updateAircraftAI) は呼ばず、動力なしで滑空降下させる。
+      // 3a. 動力なし: 空気抵抗で水平速度を徐々に減衰させる。
+      ac.throttle = 0;
+      ac.vel.x *= Math.pow(0.5, dt);
+      ac.vel.z *= Math.pow(0.5, dt);
 
-      // 3b. Lift vs. gravity: below lift speed the plane sinks (and stalls).
-      const speed = ac.vel.length();
-      if (speed >= AIRCRAFT_LIFT_SPEED) {
-        // Enough airflow: cancel most of gravity (level flight).
-        ac.vel.y += AIRCRAFT_GRAVITY * dt * 0.85;
-      } else {
-        // Stalling / sluggish: pull the nose & the plane down.
-        ac.vel.y -= AIRCRAFT_GRAVITY * dt;
-        if (speed < AIRCRAFT_STALL_SPEED) ac.pitch = Math.max(-0.6, ac.pitch - dt * 0.5);
-      }
+      // 3b. 重力で降下する。
+      ac.vel.y -= AIRCRAFT_GRAVITY * dt;
 
       // 3c. Integrate position.
       ac.pos.addScaledVector(ac.vel, dt);
 
-      // AI behaviour state machine.
-      this.updateAircraftAI(ac, dt, time);
-
-      // Keep the plane inside the world bounds: bank back toward center.
-      const lim = WORLD_SIZE / 2 - 40;
-      if (Math.abs(ac.pos.x) > lim || Math.abs(ac.pos.z) > lim) {
-        const toCenter = Math.atan2(-ac.pos.x, -ac.pos.z);
-        ac.yaw += this.angleTowards(ac.yaw, toCenter) * Math.min(1, dt * 1.5);
-      }
-
-      // Update display roll from how hard we are turning.
+      // 機首を徐々に下げ、ロールも中立へ戻す (操縦者不在の挙動)。
+      ac.pitch = Math.max(-0.6, ac.pitch - dt * 0.3);
       ac.roll = THREE.MathUtils.clamp(ac.roll * 0.9, -1, 1);
 
-      // 3d. Touched the ground → treat as a landing.
+      // 3d. 地面に触れたら着陸扱い: onGround=true, aiState="landing",
+      //     aiTimer=AIRCRAFT_RESPAWN_DELAY をセットしてリスポーン待ちにする。
       if (ac.pos.y <= 0.5) {
         ac.pos.y = 0.5;
         ac.onGround = true;
@@ -2348,6 +2304,7 @@ export class GameEngine {
         ac.vel.set(0, 0, 0);
         ac.pitch = 0;
         ac.roll = 0;
+        ac.throttle = 0;
         ac.aiState = "landing";
         ac.aiTimer = AIRCRAFT_RESPAWN_DELAY;
       }
@@ -2563,7 +2520,9 @@ export class GameEngine {
     ac.aiState = "taxiing";
     ac.aiTargetSoldierId = null;
     ac.aiTargetPos = null;
-    ac.aiTimer = 1 + Math.random() * 2;
+    // リスポーン後も自動離陸しない: タイマーを 999 にして taxiing→takeoff へ
+    // 遷移させず、滑走路南端で再び静止待機させる。
+    ac.aiTimer = 999;
   }
 
   // Smallest signed angle delta to rotate `from` toward `to` (radians).

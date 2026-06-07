@@ -1059,13 +1059,17 @@ export function generateWorld(): World {
   }
 
   // === Aircraft runway spawn points =====================================
-  // 滑走路は rwX (= AIRFIELD_CENTER_X - BASE_HALF_X * 0.46 ≈ -475),
-  // 南端 / 中央 / 北端 に3機を等間隔で並べる。すべて北向き (yaw=0) に配置。
+  // 滑走路 rwX (= AIRFIELD_CENTER_X - BASE_HALF_X * 0.46) の「南端」1箇所に
+  // 3機を横並び (X軸方向に ±9m) で静止待機させる。AI機は自動離陸しないので、
+  // プレイヤーが Gキーで搭乗した機体だけがここから飛び立つ。
+  // 南端の Z 座標は AIRFIELD_CENTER_Z + BASE_HALF_Z - 20。すべて北向き (yaw=0)
+  // ＝離陸方向を向けて待機する。
   const RW_X = AIRFIELD_CENTER_X - BASE_HALF_X * 0.46;
+  const RW_SOUTH_Z = AIRFIELD_CENTER_Z + BASE_HALF_Z - 20;
   runwaySpawns.push(
-    { pos: new THREE.Vector3(RW_X - 8, 0.5, AIRFIELD_CENTER_Z + BASE_HALF_Z * 0.5), yaw: 0 },  // 南
-    { pos: new THREE.Vector3(RW_X,     0.5, AIRFIELD_CENTER_Z),                      yaw: 0 },  // 中央
-    { pos: new THREE.Vector3(RW_X + 8, 0.5, AIRFIELD_CENTER_Z - BASE_HALF_Z * 0.5), yaw: 0 },  // 北
+    { pos: new THREE.Vector3(RW_X - 9, 0.5, RW_SOUTH_Z), yaw: 0 },  // 南端・左
+    { pos: new THREE.Vector3(RW_X,     0.5, RW_SOUTH_Z), yaw: 0 },  // 南端・中央
+    { pos: new THREE.Vector3(RW_X + 9, 0.5, RW_SOUTH_Z), yaw: 0 },  // 南端・右
   );
 
   return {
