@@ -149,6 +149,26 @@ function smoothstep01(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
+// "Ridged" noise: folds value noise around its midpoint and inverts it so the
+// field forms sharp crests (ridge lines) instead of soft blobs. Output [0,1],
+// where 1 sits exactly on a crest. A couple of octaves give a continuous range
+// of escarpments without isolated spikes.
+function ridgeNoise(x: number, z: number): number {
+  let v = 0;
+  let amp = 0.5;
+  let freq = 1;
+  let norm = 0;
+  for (let o = 0; o < 3; o++) {
+    const n = smoothNoise(x * freq, z * freq); // [0,1]
+    const r = 1 - Math.abs(n * 2 - 1); // [0,1], 1 on the crest
+    v += amp * r * r; // square sharpens the ridge
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.13;
+  }
+  return v / norm;
+}
+
 // Continuous, smoothly rolling Mojave/Syrian-steppe elevation. Flattens to ~0
 // over the airfield and the city core (so both districts stay buildable), and
 // raises a broad mound under the Aleppo Citadel.
@@ -157,6 +177,28 @@ export function baseTerrainHeight(x: number, z: number): number {
   const dunes = (fbm2(x * 0.0042 + 11.3, z * 0.0042 - 7.1) - 0.5) * 2; // [-1,1]
   const ripples = (fbm2(x * 0.02 + 51.7, z * 0.02 + 23.9) - 0.5) * 2;
   let h = dunes * 9.0 + ripples * 1.3;
+
+  // --- Per-region relief: stronger ridges (稜線) and carved valleys (谷) -----
+  // The open ground between the districts gets a much bolder profile: long
+  // rocky escarpments (ridge lines) rising out of the steppe, and dry
+  // wadi-style valleys cut down between them. Both use low-frequency fields so
+  // the relief reads as broad terrain "regions" the player crosses, not noise.
+
+  // Ridge crests — broad, oriented NW↔SE so they form continuous spines rather
+  // than isolated humps. Raised on top of the dunes.
+  const ridge = ridgeNoise(x * 0.0026 + 4.2, z * 0.0031 - 9.6); // [0,1]
+  // Gate the ridges so only the upper band actually rises (keeps the lowlands
+  // open) and feather the onset for smooth flanks.
+  const ridgeMask = smoothstep01((ridge - 0.45) / 0.45);
+  h += ridgeMask * 26.0;
+
+  // Valleys — a separate low-frequency channel network carved BELOW the rolling
+  // surface. Where the valley field is near its crest we dig a smooth trough.
+  const valley = ridgeNoise(x * 0.0019 - 21.7, z * 0.0017 + 13.1); // [0,1]
+  const valleyMask = smoothstep01((valley - 0.5) / 0.4);
+  // Only carve where we are NOT on a ridge, so crests stay sharp and the
+  // valleys read as the lowland floors between the spines.
+  h -= valleyMask * (1 - ridgeMask) * 16.0;
 
   // Flatten the Aleppo city core (circular disc on the east side).
   const distFromCity = Math.hypot(x - CITY_CENTER_X, z - CITY_CENTER_Z);
@@ -758,8 +800,16 @@ export function generateWorld(): World {
   const baseEastEdge = BASE_POS.x + BASE_HALF_X;
   roads.push({ pos: new THREE.Vector3((baseEastEdge + cityCX) / 2, 0.01, cityCZ), size: new THREE.Vector3(cityCX - baseEastEdge, 0.02, 9), color: "#5a4d34" });
 
+  // --- Multi-layer market plaza around the central fountain ---------------
+  // The flat souk square is rebuilt as a tiered civic space: a stepped central
+  // dais carrying the fountain, an elevated walkable gallery ring reached by
+  // stairs, and a sunken lower court. Pure cover/traversal geometry, so kept in
+  // its own wall list (no per-storey window decoration).
+  const plazaWalls = buildMarketPlaza(plazaX, plazaZ, lamps, pickupSpawns);
+
   // Market tents — two denser rings around the central fountain plaza,
-  // forming a busy souk.
+  // forming a busy souk. Tents on the raised gallery ring are lifted onto its
+  // deck; those near the central dais are skipped so the steps stay clear.
   const tentColors = ["#b04030", "#3060a0", "#a08030", "#6a4030", "#8a6020", "#406a40"];
   for (let i = 0; i < 34; i++) {
     const a = (i / 34) * Math.PI * 2 + (i % 2) * 0.09;
@@ -767,7 +817,10 @@ export function generateWorld(): World {
     const tx = plazaX + Math.cos(a) * r;
     const tz = plazaZ + Math.sin(a) * r;
     if (insideAnyBuilding(new THREE.Vector3(tx, 0, tz), buildings, 1.2)) continue;
-    tents.push({ pos: new THREE.Vector3(tx, 0, tz), color: tentColors[Math.floor(rng() * tentColors.length)] });
+    // Lift tents that sit on the elevated gallery ring (between r≈26 and r≈34)
+    // up onto its deck so they read as a stalls on the upper terrace.
+    const galleryY = r >= 25 && r <= 35 ? PLAZA_GALLERY_Y : 0;
+    tents.push({ pos: new THREE.Vector3(tx, galleryY, tz), color: tentColors[Math.floor(rng() * tentColors.length)] });
   }
 
   // Street lamps along the city's main roads (reaching out across the enlarged
@@ -884,6 +937,14 @@ export function generateWorld(): World {
     });
   }
 
+  // --- District-seam crossings: a vehicle overpass + a berm tunnel ---------
+  // The seam is the front line between the airbase (west) and the city (east).
+  // Two purpose-built ways to cross it: an elevated concrete bridge to the
+  // north and a tunnel bored through a raised earth berm to the south. The
+  // tunnel pushes a TerrainHill (berm) so the bore reads as cutting through a
+  // real mound; that hill must exist before props are seated below.
+  const seamWalls = buildSeamCrossings(DISTRICT_SEAM_X, hills, lamps, roads);
+
   // --- Home base (large forward-operating airbase) near the south edge ----
   const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads);
 
@@ -892,6 +953,8 @@ export function generateWorld(): World {
   walls.push(...citadelWalls);
   walls.push(...perimeter);
   walls.push(...baseWalls);
+  walls.push(...seamWalls);
+  walls.push(...plazaWalls);
 
   // Ground height (base dunes + authored mounds) used to seat props on the
   // rolling terrain. Mirrors terrainHeightAt() but without needing the World.
@@ -909,6 +972,13 @@ export function generateWorld(): World {
     }
     return h;
   };
+
+  // Seat the seam-crossing structures (overpass + tunnel) onto the terrain.
+  // They are built with y measured from local ground=0, so lift each segment by
+  // the BASE terrain height at its footprint. Using the base height (not
+  // groundAt) is intentional for the tunnel: its bore must sit on the ground
+  // *under* the berm mound rather than on top of it.
+  for (const w of seamWalls) w.pos.y += baseTerrainHeight(w.pos.x, w.pos.z);
 
   // Seat ground props onto the terrain so nothing floats or sinks.
   for (const c of crates) c.pos.y += groundAt(c.pos.x, c.pos.z);
@@ -1323,6 +1393,301 @@ function buildAirfieldTower(buildings: Building[], tx: number, tz: number, baseY
       color: concrete, roofColor: roofCol, hasParapet: false,
     },
   });
+}
+
+// === DISTRICT-SEAM CROSSINGS ==============================================
+// Build the two ways across the fortified seam between the airbase and the
+// city: (1) an elevated concrete vehicle OVERPASS to the north, with ramped
+// approaches, piers, a walkable deck and side railings; and (2) a TUNNEL bored
+// through a raised earth berm to the south, with portal head-walls, interior
+// jamb walls and a roof slab so the player/AI can drive straight through.
+//
+// `hills` is appended to (the tunnel berm is a real TerrainHill so the bore
+// reads as cutting through a mound). Returns the collidable wall segments.
+function buildSeamCrossings(
+  seamX: number,
+  hills: TerrainHill[],
+  lamps: Lamp[],
+  roads: Road[],
+): Wall[] {
+  const walls: Wall[] = [];
+  const concrete = "#9a958c";
+  const concreteDark = "#7d796f";
+  const deckColor = "#6f6a60";
+
+  // ---------------------------------------------------------------------
+  // (1) NORTH OVERPASS — a raised deck spanning the seam corridor.
+  // ---------------------------------------------------------------------
+  const bridgeZ = -WORLD_SIZE * 0.22; // north of center, clear of the city core
+  const deckY = 7.0;                  // clearance over the seam blast-walls
+  const deckW = 16;                   // east-west span across the seam
+  const deckLen = 14;                 // north-south width of the carriageway
+  const deckThick = 0.8;
+  const rampRun = 26;                 // length of each approach ramp
+
+  // Deck slab (walkable bridge surface, flat-topped).
+  walls.push({
+    pos: new THREE.Vector3(seamX, deckY, bridgeZ),
+    size: new THREE.Vector3(deckW, deckThick, deckLen),
+    color: deckColor,
+    kind: "floor",
+  });
+
+  // Two support piers down to the ground on each side of the corridor.
+  for (const sx of [-1, 1]) {
+    const pierX = seamX + sx * (deckW / 2 - 1.4);
+    walls.push({
+      pos: new THREE.Vector3(pierX, deckY / 2, bridgeZ),
+      size: new THREE.Vector3(2.0, deckY, deckLen * 0.7),
+      color: concreteDark,
+      kind: "pillar",
+    });
+  }
+
+  // Side railings / parapets along both long edges of the deck.
+  const railH = 1.1;
+  for (const sz of [-1, 1]) {
+    walls.push({
+      pos: new THREE.Vector3(seamX, deckY + deckThick / 2 + railH / 2, bridgeZ + sz * (deckLen / 2 - 0.3)),
+      size: new THREE.Vector3(deckW + 0.6, railH, 0.4),
+      color: concrete,
+      kind: "barrier",
+    });
+  }
+
+  // Stepped approach ramps on each side (a short staircase of slabs climbing to
+  // the deck) so vehicles/players can mount the overpass from either district.
+  const rampSteps = 7;
+  for (const dir of [-1, 1]) {
+    // dir = -1 → ramp on the west (airbase) side, +1 → east (city) side.
+    const startX = seamX + dir * (deckW / 2);
+    for (let s = 0; s < rampSteps; s++) {
+      const t = s / (rampSteps - 1);
+      const y = deckY * t; // climb from ground (t=0) to deck (t=1)
+      const segLen = rampRun / rampSteps;
+      const stepX = startX + dir * (s + 0.5) * segLen;
+      walls.push({
+        pos: new THREE.Vector3(stepX, y / 2, bridgeZ),
+        size: new THREE.Vector3(segLen + 0.4, Math.max(0.5, y), deckLen),
+        color: deckColor,
+        kind: "floor",
+      });
+    }
+  }
+
+  // A pair of lamps on the bridge deck corners.
+  for (const sx of [-1, 1]) {
+    lamps.push({ pos: new THREE.Vector3(seamX + sx * (deckW / 2 - 1.0), deckY + deckThick, bridgeZ) });
+  }
+
+  // ---------------------------------------------------------------------
+  // (2) SOUTH TUNNEL — a bore through a raised earth berm.
+  // ---------------------------------------------------------------------
+  const tunnelZ = WORLD_SIZE * 0.2; // south of center
+  const bermRadius = 60;
+  const bermHeight = 16;
+  // Raise a real terrain mound (berm) the tunnel cuts through.
+  hills.push({
+    pos: new THREE.Vector3(seamX, 0, tunnelZ),
+    radius: bermRadius,
+    height: bermHeight,
+    color: "#8a7a54",
+  });
+
+  const bore = 9;        // east-west length of the tunnel (through the berm)
+  const boreW = 9;       // carriageway width (north-south)
+  const boreH = 5.5;     // interior clearance
+  const wallT = 1.2;
+
+  // Interior side walls (north & south jambs running through the bore).
+  for (const sz of [-1, 1]) {
+    walls.push({
+      pos: new THREE.Vector3(seamX, boreH / 2, tunnelZ + sz * (boreW / 2 + wallT / 2)),
+      size: new THREE.Vector3(bore + 16, boreH, wallT),
+      color: concreteDark,
+      kind: "wall",
+    });
+  }
+  // Roof slab over the bore (holds the berm up over the carriageway).
+  walls.push({
+    pos: new THREE.Vector3(seamX, boreH + 0.4, tunnelZ),
+    size: new THREE.Vector3(bore + 16, 0.8, boreW + wallT * 2 + 0.6),
+    color: concreteDark,
+    kind: "roof",
+  });
+
+  // Portal head-walls at each end (a framed concrete face around the opening,
+  // built as a lintel beam plus two jambs that flank the carriageway).
+  for (const dir of [-1, 1]) {
+    const portalX = seamX + dir * (bore / 2 + 8);
+    // Lintel beam above the opening.
+    walls.push({
+      pos: new THREE.Vector3(portalX, boreH + 1.1, tunnelZ),
+      size: new THREE.Vector3(2.0, 2.2, boreW + 7),
+      color: concrete,
+      kind: "wall",
+    });
+    // Side jambs flanking the opening.
+    for (const sz of [-1, 1]) {
+      walls.push({
+        pos: new THREE.Vector3(portalX, (boreH + 1) / 2, tunnelZ + sz * (boreW / 2 + 2.4)),
+        size: new THREE.Vector3(2.0, boreH + 1, 4.0),
+        color: concrete,
+        kind: "wall",
+      });
+    }
+  }
+
+  // A short paved approach road on each side of the tunnel mouth, linking the
+  // bore to the open ground (seated onto terrain later by groundAt()).
+  for (const dir of [-1, 1]) {
+    roads.push({
+      pos: new THREE.Vector3(seamX + dir * (bore / 2 + 16), 0.05, tunnelZ),
+      size: new THREE.Vector3(20, 0.02, boreW),
+      color: "#5a4d34",
+    });
+  }
+
+  return walls;
+}
+
+// Deck height of the elevated market-plaza gallery ring (used both by the
+// plaza builder and to lift tents that sit on the ring).
+export const PLAZA_GALLERY_Y = 3.2;
+
+// === MULTI-LAYER MARKET PLAZA =============================================
+// Turn the flat souk square around the central fountain into a tiered civic
+// space:
+//   * a stepped CENTRAL DAIS (concentric terraces) carrying the fountain,
+//   * an elevated walkable GALLERY RING (deck on a colonnade) reached by four
+//     stairways, with a low parapet so it gives rooftop-style cover,
+//   * a ring of columns supporting the gallery.
+// All segments are plain collidable boxes (floor/wall/pillar/barrier) seated on
+// the flattened city ground (y=0 here). Returns the wall segments; a couple of
+// pickup spawns are added on the dais + gallery as a reward for the high ground.
+function buildMarketPlaza(
+  px: number,
+  pz: number,
+  lamps: Lamp[],
+  pickupSpawns: PickupSpawn[],
+): Wall[] {
+  const walls: Wall[] = [];
+  const stone = "#b3a487";
+  const stoneDark = "#8f8265";
+  const deck = "#a59a78";
+
+  // ---- Central stepped dais (3 concentric circular terraces) -------------
+  // Approximated by stacked square slabs of decreasing size so the fountain
+  // sits on a raised, climbable platform.
+  const tierCount = 3;
+  const tierH = 0.45;
+  const baseHalf = 8.5; // outer terrace half-extent
+  for (let t = 0; t < tierCount; t++) {
+    const half = baseHalf - t * 2.4;
+    const y = t * tierH;
+    walls.push({
+      pos: new THREE.Vector3(px, y + tierH / 2, pz),
+      size: new THREE.Vector3(half * 2, tierH, half * 2),
+      color: t % 2 ? stoneDark : stone,
+      kind: "floor",
+    });
+  }
+
+  // ---- Elevated gallery ring (square deck on a colonnade) ----------------
+  const galleryY = PLAZA_GALLERY_Y;
+  const ringInner = 26; // inner edge half-extent of the ring deck
+  const ringOuter = 34; // outer edge half-extent
+  const deckThick = 0.6;
+  const ringMid = (ringInner + ringOuter) / 2;
+  const ringWidth = ringOuter - ringInner;
+
+  // Four deck strips (N, S, E, W) forming a square walkway ring, each leaving a
+  // central gap aligned with the stairways below.
+  // North & South strips run along x.
+  for (const sz of [-1, 1]) {
+    walls.push({
+      pos: new THREE.Vector3(px, galleryY, pz + sz * ringMid),
+      size: new THREE.Vector3(ringOuter * 2, deckThick, ringWidth),
+      color: deck,
+      kind: "floor",
+    });
+  }
+  // East & West strips run along z (shortened to butt against the N/S strips).
+  for (const sx of [-1, 1]) {
+    walls.push({
+      pos: new THREE.Vector3(px + sx * ringMid, galleryY, pz),
+      size: new THREE.Vector3(ringWidth, deckThick, ringInner * 2),
+      color: deck,
+      kind: "floor",
+    });
+  }
+
+  // Low parapet around the OUTER edge of the gallery ring (cover on the deck).
+  const parH = 1.0;
+  const parT = 0.4;
+  const parY = galleryY + deckThick / 2 + parH / 2;
+  for (const sz of [-1, 1]) {
+    walls.push({ pos: new THREE.Vector3(px, parY, pz + sz * ringOuter), size: new THREE.Vector3(ringOuter * 2 + parT, parH, parT), color: stone, kind: "barrier" });
+  }
+  for (const sx of [-1, 1]) {
+    walls.push({ pos: new THREE.Vector3(px + sx * ringOuter, parY, pz), size: new THREE.Vector3(parT, parH, ringOuter * 2 + parT), color: stone, kind: "barrier" });
+  }
+
+  // Colonnade: columns under the gallery ring supporting the deck.
+  const colCount = 12;
+  for (let i = 0; i < colCount; i++) {
+    const a = (i / colCount) * Math.PI * 2;
+    const cxp = px + Math.cos(a) * ringMid;
+    const czp = pz + Math.sin(a) * ringMid;
+    walls.push({
+      pos: new THREE.Vector3(cxp, galleryY / 2, czp),
+      size: new THREE.Vector3(0.8, galleryY, 0.8),
+      color: stoneDark,
+      kind: "pillar",
+    });
+  }
+
+  // Four stairways climbing from the court up to the gallery deck (one per
+  // cardinal direction, set in the gaps between deck strips).
+  const stepCount = 7;
+  const stairRun = 7;
+  for (let dir = 0; dir < 4; dir++) {
+    const ang = (dir / 4) * Math.PI * 2; // 0,90,180,270
+    const ux = Math.cos(ang);
+    const uz = Math.sin(ang);
+    // Start just inside the inner ring edge, climb outward to the deck.
+    const startR = ringInner - 1.0;
+    for (let s = 0; s < stepCount; s++) {
+      const t = (s + 0.5) / stepCount;
+      const r = startR + t * stairRun;
+      const y = galleryY * ((s + 1) / stepCount);
+      const sxp = px + ux * r;
+      const szp = pz + uz * r;
+      // Step slab oriented across the climb direction.
+      const along = Math.abs(ux) > Math.abs(uz);
+      walls.push({
+        pos: new THREE.Vector3(sxp, y - galleryY / (stepCount * 2), szp),
+        size: along
+          ? new THREE.Vector3(stairRun / stepCount + 0.3, Math.max(0.4, y), 4.0)
+          : new THREE.Vector3(4.0, Math.max(0.4, y), stairRun / stepCount + 0.3),
+        color: stoneDark,
+        kind: "floor",
+      });
+    }
+  }
+
+  // Lamps at the four outer corners of the gallery ring.
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      lamps.push({ pos: new THREE.Vector3(px + sx * ringOuter, galleryY + deckThick, pz + sz * ringOuter) });
+    }
+  }
+
+  // Reward pickups: ammo on the central dais top, a weapon on the gallery deck.
+  pickupSpawns.push({ pos: new THREE.Vector3(px + 5, tierCount * tierH + 0.4, pz), kind: "ammo", amount: 60 });
+  pickupSpawns.push({ pos: new THREE.Vector3(px + ringMid, galleryY + deckThick + 0.4, pz), kind: "weapon", weaponId: "sniper" });
+
+  return walls;
 }
 
 function insideAnyBuilding(p: THREE.Vector3, buildings: Building[], pad: number) {
