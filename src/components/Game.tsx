@@ -19,6 +19,8 @@ import treeLeavesUrl from "@/assets/tree_leaves.webp";
 import groundSandDiffUrl from "@/assets/new/gravelly_sand_diff_1k.webp";
 // --- Cobblestone / road (gravel floor) ---
 import roadStoneDiffUrl from "@/assets/new/gravel_floor_diff_1k.webp";
+// --- Asphalt (roads / runway / taxiway / apron) ---
+import asphaltDiffUrl from "@/assets/new/asphalt_track_diff_1k.jpg";
 // --- Walls (layered concrete) ---
 import wallDiffUrl from "@/assets/new/concrete_layers_02_diff_1k.webp";
 import wallNorUrl from "@/assets/new/concrete_layers_02_nor_gl_1k.webp";
@@ -84,6 +86,7 @@ const TEXTURE_URLS = [
   // High-quality PBR sets from assets/new
   groundSandDiffUrl,
   roadStoneDiffUrl,
+  asphaltDiffUrl,
   wallDiffUrl,
   wallNorUrl,
   wallRoughUrl,
@@ -558,8 +561,9 @@ function DustParticles() {
 }
 
 function Roads() {
-  // Gravel-floor diffuse from assets/new — a more believable packed-stone road.
-  const stoneTex = useTiledTexture(roadStoneDiffUrl, 1, 12);
+  // Asphalt diffuse from assets/new — used for every road, taxiway, apron and
+  // the main runway surface so the paved areas read as real tarmac.
+  const stoneTex = useTiledTexture(asphaltDiffUrl, 1, 12);
   const mat = useMemo(() => new THREE.ShaderMaterial({
     uniforms: {
       stoneTex: { value: stoneTex },
@@ -593,13 +597,17 @@ function Roads() {
       }
       void main() {
         vec2 p = vWorldPos.xz;
-        // Cobblestone texture tiled — show at full brightness
-        vec3 stone = texture2D(stoneTex, p * 0.18).rgb;
-        float dust = noise(p * 0.5) * 0.15;
-        vec3 col = stone * (1.12 + dust * 0.12);
-        // Tire marks slightly darken
+        // Asphalt diffuse tiled. Sample at two scales and blend so the tarmac
+        // doesn't read as an obviously repeating tile across big aprons.
+        vec3 asphaltNear = texture2D(stoneTex, p * 0.16).rgb;
+        vec3 asphaltFar  = texture2D(stoneTex, p * 0.045).rgb;
+        vec3 stone = mix(asphaltNear, asphaltFar, 0.35);
+        float dust = noise(p * 0.5) * 0.12;
+        // Lift the dark tarmac a touch so it stays readable under the desert sun.
+        vec3 col = stone * (1.35 + dust * 0.1);
+        // Tire marks / scuffing slightly darken.
         float tire = smoothstep(0.55, 0.7, noise(vec2(p.x * 0.4, p.z * 4.0)));
-        col = mix(col, col * 0.95, tire * 0.18);
+        col = mix(col, col * 0.9, tire * 0.22);
         float fogF = clamp((vFogDepth - fogNear) / (fogFar - fogNear), 0.0, 1.0);
         col = mix(col, fogColor, fogF);
         gl_FragColor = vec4(col, 1.0);
@@ -2336,11 +2344,12 @@ function AircraftScene() {
         }
         g.add(mesh);
       }
-      // Position + full flight orientation. Model nose faces -Z, so add PI to
-      // yaw to align the silhouette's forward direction with the sim heading.
+      // Position + full flight orientation. The model nose faces -Z (cockpit
+      // forward, nozzle/flame at +Z), and the sim forward vector at yaw=0 is
+      // also -Z, so the yaw maps directly with no 180° offset.
       mesh.position.copy(v.pos);
       mesh.rotation.order = 'YXZ';
-      mesh.rotation.y = v.yaw + Math.PI;
+      mesh.rotation.y = v.yaw;
       mesh.rotation.x = -v.pitch;
       mesh.rotation.z = -v.roll;
       // Grounded-but-alive planes stay visible (parked on the runway); only

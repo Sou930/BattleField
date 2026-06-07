@@ -1134,13 +1134,18 @@ function buildBaseCompound(
   const halfX = BASE_HALF_X; // east-west
   const halfZ = BASE_HALF_Z; // north-south (runway runs along z)
 
-  // Surface / marking paint heights (lifted clearly above the flattened sand so
-  // nothing z-fights / "vanishes").
-  const APRON_Y = 0.05;
-  const Y_SHOULDER = 0.06;
-  const Y_SURFACE = 0.08;
-  const PAINT_Y = 0.16;
-  const PAINT2_Y = 0.18;
+  // Surface / marking paint heights. The detailed terrain mesh is a coarse
+  // (~20 m cell) displaced grid, so near the flattened-airfield edges a triangle
+  // can interpolate a few tens of centimetres above the nominal flat (y≈0)
+  // surface and poke up through a thin, ground-hugging decal — which is exactly
+  // why the runway looked half-buried. Lift the whole paved stack well clear of
+  // that interpolation error so the asphalt always reads as sitting on top of
+  // the ground, then layer the paint just above the tarmac.
+  const APRON_Y = 0.35;
+  const Y_SHOULDER = 0.34;
+  const Y_SURFACE = 0.40;
+  const PAINT_Y = 0.48;
+  const PAINT2_Y = 0.50;
 
   // --- Concrete apron covering the whole compound floor ------------------
   // Thin road decal (not a collidable floor box) so it sits flush on the
