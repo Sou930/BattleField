@@ -22,6 +22,10 @@ export class Input {
   aircraftEnterPressed = false;
   // 乗り物搭乗中の視点切り替え (V): 三人称 ⇔ 一人称
   viewTogglePressed = false;
+  // 航空機: エアブレーキ (押している間ON / モバイルはホールド)
+  aircraftAirbrake = false;
+  // 航空機: ランディングギア(脚)の出し入れトグル
+  gearTogglePressed = false;
 
   private el: HTMLElement;
   private onKey = (e: KeyboardEvent, down: boolean) => {
@@ -31,6 +35,11 @@ export class Input {
     if (down && e.code === "KeyM") this.mapTogglePressed = true;
     if (down && e.code === "KeyG") this.aircraftEnterPressed = true;
     if (down && e.code === "KeyV") this.viewTogglePressed = true;
+    // 航空機: ランディングギア(脚) トグル (KeyF はキー押下の瞬間だけ反応)
+    if (down && e.code === "KeyF") this.gearTogglePressed = true;
+    // 航空機: エアブレーキ (Shift / B を押している間ON)
+    if (e.code === "ShiftLeft" || e.code === "ShiftRight" || e.code === "KeyB")
+      this.aircraftAirbrake = down;
   };
   private onMove = (e: MouseEvent) => {
     if (!this.locked) return;
@@ -98,4 +107,7 @@ export class Input {
   pressViewToggle() { this.viewTogglePressed = true; }
   setVehicleGas(on: boolean) { this.vehicleGas = on; }
   setVehicleBrake(on: boolean) { this.vehicleBrake = on; }
+  // 航空機補助操作 (モバイル用)
+  setAircraftAirbrake(on: boolean) { this.aircraftAirbrake = on; }
+  pressGearToggle() { this.gearTogglePressed = true; }
 }

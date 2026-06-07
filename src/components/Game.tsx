@@ -2717,6 +2717,10 @@ export default function Game() {
       set mapTogglePressed(v: boolean) { input.mapTogglePressed = v; },
       get viewTogglePressed() { return input.viewTogglePressed; },
       set viewTogglePressed(v: boolean) { input.viewTogglePressed = v; },
+      get aircraftAirbrake() { return input.aircraftAirbrake; },
+      set aircraftAirbrake(v: boolean) { input.aircraftAirbrake = v; },
+      get gearTogglePressed() { return input.gearTogglePressed; },
+      set gearTogglePressed(v: boolean) { input.gearTogglePressed = v; },
     } as any, sharedWorld);
     setEngine(eng);
   }, []);

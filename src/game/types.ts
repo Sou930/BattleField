@@ -272,6 +272,12 @@ export interface Aircraft {
   stalling: boolean;
   // 旋回G (表示用 / 誘導抗力計算用)。
   gForce: number;
+  // --- エアブレーキ / ランディングギア (操縦補助) ---
+  // エアブレーキ展開中フラグ。展開すると抗力が増えて減速し、着陸しやすくなる。
+  airbrake: boolean;
+  // ランディングギア(脚)展開中フラグ。離陸時は格納、着陸時は展開する。
+  // 脚を出すと抗力が少し増えるが、接地時の着陸判定が緩くなる。
+  gearDown: boolean;
 }
 
 export interface AircraftBomb {
