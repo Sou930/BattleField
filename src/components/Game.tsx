@@ -42,6 +42,39 @@ import sandbagRoughUrl from "@/assets/new/sandy_gravel_02_rough_1k.webp";
 
 const sharedWorld = generateWorld();
 
+// --- Runtime perf helpers -------------------------------------------------
+// Recursively dispose the geometries/materials (and their textures) of an
+// object before it is removed from a group. THREE does NOT free GPU buffers
+// automatically when a mesh is detached, so without this the per-frame
+// add/remove churn in the effect groups (grenades, explosions, hits, smoke,
+// soldiers, ...) slowly leaks VRAM and grows the GC graph. Behaviour /
+// visuals are unchanged — this only releases resources that are no longer
+// referenced.
+function disposeObject(obj: THREE.Object3D) {
+  obj.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+    const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
+    if (mat) {
+      const mats = Array.isArray(mat) ? mat : [mat];
+      for (const m of mats) m.dispose();
+    }
+  });
+}
+
+// Remove a child from its parent group AND release its GPU resources.
+function removeAndDispose(group: THREE.Object3D, child: THREE.Object3D) {
+  group.remove(child);
+  disposeObject(child);
+}
+
+// Scratch Color objects reused across frames to avoid allocating a fresh
+// THREE.Color (and the resulting GC pressure) inside hot useFrame loops.
+const _scratchColorA = new THREE.Color();
+const _scratchColorB = new THREE.Color();
+const _explosionColorFrom = new THREE.Color("#ffe18a");
+const _explosionColorTo = new THREE.Color("#ff3a14");
+
 // All in-game textures. Kept here so they can be warmed into the browser /
 // THREE cache while the menu is on screen — by the time the player presses
 // Start, decoding is already done and the map appears almost instantly.
@@ -1190,7 +1223,7 @@ function Pickups() {
     const ids = new Set(list.map((p) => p.id));
     for (let i = g.children.length - 1; i >= 0; i--) {
       const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) g.remove(c);
+      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
     }
     for (const pk of list) {
       let m = g.children.find((c: any) => c.userData.id === pk.id) as THREE.Group | undefined;
@@ -1236,7 +1269,7 @@ function Soldiers() {
     const ids = new Set(store.state.soldiers.map((e) => e.id));
     for (let i = g.children.length - 1; i >= 0; i--) {
       const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) g.remove(c);
+      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
     }
     for (const e of store.state.soldiers) {
       let mesh = g.children.find((c: any) => c.userData.id === e.id) as THREE.Group | undefined;
@@ -1522,7 +1555,7 @@ function Grenades() {
     const ids = new Set(store.state.grenades.map((x) => x.id));
     for (let i = g.children.length - 1; i >= 0; i--) {
       const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) g.remove(c);
+      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
     }
     for (const gr of store.state.grenades) {
       let m = g.children.find((c: any) => c.userData.id === gr.id) as THREE.Mesh | undefined;
@@ -1537,7 +1570,9 @@ function Grenades() {
       }
       m.position.copy(gr.pos);
       const intensity = gr.fuse < 1 ? Math.sin(performance.now() / 60) * 0.5 + 0.5 : 0;
-      (m.material as THREE.MeshStandardMaterial).emissive = new THREE.Color(
+      // Reuse the material's existing Color instead of allocating a new one
+      // every frame for every live grenade.
+      (m.material as THREE.MeshStandardMaterial).emissive.setRGB(
         intensity * 0.9,
         intensity * 0.15,
         0,
@@ -1562,7 +1597,7 @@ function Explosions() {
       g.add(m);
     }
     while (g.children.length > store.state.explosions.length) {
-      g.remove(g.children[g.children.length - 1]);
+      removeAndDispose(g, g.children[g.children.length - 1]);
     }
     store.state.explosions.forEach((e, i) => {
       const m = g.children[i] as THREE.Mesh;
@@ -1572,11 +1607,9 @@ function Explosions() {
       m.position.copy(e.pos);
       const mat = m.material as THREE.MeshBasicMaterial;
       mat.opacity = (1 - t) * 0.85;
-      mat.color = new THREE.Color().lerpColors(
-        new THREE.Color("#ffe18a"),
-        new THREE.Color("#ff3a14"),
-        t,
-      );
+      // Lerp directly into the material's own Color using shared constant
+      // endpoints — no per-frame Color allocations.
+      mat.color.lerpColors(_explosionColorFrom, _explosionColorTo, t);
     });
   });
   return <group ref={ref} />;
@@ -1595,7 +1628,7 @@ function Hits() {
       g.add(m);
     }
     while (g.children.length > store.state.hits.length) {
-      g.remove(g.children[g.children.length - 1]);
+      removeAndDispose(g, g.children[g.children.length - 1]);
     }
     store.state.hits.forEach((h, i) => {
       const m = g.children[i] as THREE.Mesh;
@@ -1623,14 +1656,15 @@ function MuzzleFlashes() {
       g.add(m);
     }
     while (g.children.length > store.state.flashes.length) {
-      g.remove(g.children[g.children.length - 1]);
+      removeAndDispose(g, g.children[g.children.length - 1]);
     }
     store.state.flashes.forEach((f, i) => {
       const m = g.children[i] as THREE.Mesh;
       m.position.copy(f.pos);
       m.scale.setScalar(0.7 + Math.random() * 0.6);
       const mat = m.material as THREE.MeshBasicMaterial;
-      mat.color = new THREE.Color(f.color);
+      // Set into the existing Color rather than allocating one per frame.
+      mat.color.set(f.color);
       mat.opacity = Math.min(1, f.ttl / 0.06);
     });
   });
@@ -1645,7 +1679,7 @@ function SmokeCloudsScene() {
     if (!g) return;
     const clouds = store.state.smokeClouds;
     // Remove old meshes
-    while (g.children.length > clouds.length) g.remove(g.children[g.children.length - 1]);
+    while (g.children.length > clouds.length) removeAndDispose(g, g.children[g.children.length - 1]);
     // Add/update
     for (let i = 0; i < clouds.length; i++) {
       const sc = clouds[i];
@@ -1685,7 +1719,7 @@ function DestructiblesScene() {
     const dList = store.state.destructibles.filter(d => !d.destroyed);
     // Rebuild if count changed
     if (g.children.length !== dList.length) {
-      while (g.children.length > 0) g.remove(g.children[0]);
+      while (g.children.length > 0) removeAndDispose(g, g.children[0]);
       for (const d of dList) {
         let geo: THREE.BufferGeometry;
         if (d.kind === "barrel") {
@@ -1728,7 +1762,7 @@ function RagdollsScene() {
     const g = ref.current;
     if (!g) return;
     const parts = store.state.ragdolls;
-    while (g.children.length > parts.length) g.remove(g.children[g.children.length - 1]);
+    while (g.children.length > parts.length) removeAndDispose(g, g.children[g.children.length - 1]);
     for (let i = 0; i < parts.length; i++) {
       const r = parts[i];
       let mesh = g.children[i] as THREE.Mesh | undefined;
@@ -1758,7 +1792,7 @@ function BulletTrails() {
     const g = ref.current;
     if (!g) return;
     const trails = store.state.trails;
-    while (g.children.length > trails.length) g.remove(g.children[g.children.length - 1]);
+    while (g.children.length > trails.length) removeAndDispose(g, g.children[g.children.length - 1]);
     for (let i = 0; i < trails.length; i++) {
       const t = trails[i];
       let line = g.children[i] as THREE.Line | undefined;
@@ -2086,7 +2120,7 @@ function VehiclesScene() {
     const ids = new Set(vehs.map(v => v.id));
     for (let i = g.children.length - 1; i >= 0; i--) {
       const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) g.remove(c);
+      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
     }
     for (const v of vehs) {
       let mesh = g.children.find((c: any) => c.userData.id === v.id) as THREE.Group | undefined;
@@ -2121,7 +2155,7 @@ function CapturePointsScene() {
     const g = ref.current;
     if (!g) return;
     const cps = store.state.capturePoints;
-    while (g.children.length > cps.length) g.remove(g.children[g.children.length - 1]);
+    while (g.children.length > cps.length) removeAndDispose(g, g.children[g.children.length - 1]);
     for (let i = 0; i < cps.length; i++) {
       const cp = cps[i];
       let mesh = g.children[i] as THREE.Mesh | undefined;
