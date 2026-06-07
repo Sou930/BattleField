@@ -5,6 +5,7 @@ import { Input } from "@/game/input";
 import { cn } from "@/lib/utils";
 import { WORLD_SIZE, buildMapData, generateWorld, type MapData } from "@/game/world";
 import { CLASSES } from "@/game/classes";
+import { GameEngine } from "@/game/engine";
 import type { WeaponId, Loadout, SoldierClass } from "@/game/types";
 
 interface Props {
@@ -880,7 +881,10 @@ function LoadoutScreen({ onStart, isMobile }: { onStart: (loadout: Loadout) => v
   const [secondary, setSecondary] = useState<WeaponId>(classSpec.secondary);
   const [grenadeCount, setGrenadeCount] = useState(classSpec.grenadeCount);
   const [smokeCount, setSmokeCount] = useState(classSpec.smokeCount);
+  // Default deployment: the home base (index 0).
+  const [spawnIndex, setSpawnIndex] = useState(0);
 
+  const spawnDefs = GameEngine.SPAWN_DEFS;
   const allClasses: SoldierClass[] = ["assault", "sniper", "support", "medic"];
   const primaries: WeaponId[] = ["rifle", "smg", "sniper"];
   const secondaries: WeaponId[] = ["pistol", "smg"];
@@ -895,7 +899,7 @@ function LoadoutScreen({ onStart, isMobile }: { onStart: (loadout: Loadout) => v
   };
 
   const handleDeploy = () => {
-    onStart({ primary, secondary, grenadeCount, smokeCount, soldierClass });
+    onStart({ primary, secondary, grenadeCount, smokeCount, soldierClass, spawnIndex });
   };
 
   return (
@@ -1018,13 +1022,51 @@ function LoadoutScreen({ onStart, isMobile }: { onStart: (loadout: Loadout) => v
               </div>
             </div>
           </div>
+
+          {/* Spawn point selection */}
+          <div>
+            <div className="text-xs uppercase tracking-widest text-muted-foreground mb-2">
+              Deploy Point / 出撃地点
+            </div>
+            <div className="grid grid-cols-1 gap-2">
+              {spawnDefs.map((sp, i) => (
+                <button
+                  key={sp.name}
+                  onClick={() => setSpawnIndex(i)}
+                  className={cn(
+                    "rounded border px-3 py-2.5 text-left text-xs transition-all",
+                    spawnIndex === i
+                      ? "border-[hsl(var(--hud))] bg-[hsl(var(--hud))] text-[hsl(var(--hud-foreground))]"
+                      : "border-border/40 bg-background/60 text-muted-foreground hover:border-[hsl(var(--hud)/0.5)]",
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold uppercase tracking-wider">{sp.name}</span>
+                    {sp.frontline && (
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider",
+                          spawnIndex === i
+                            ? "bg-[hsl(var(--hud-foreground)/0.2)] text-[hsl(var(--hud-foreground))]"
+                            : "bg-red-500/20 text-red-400",
+                        )}
+                      >
+                        ⚔ 最前線
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[10px] opacity-75">{sp.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <button
           onClick={handleDeploy}
           className="mt-6 w-full rounded bg-[hsl(var(--hud))] px-6 py-3 text-sm font-bold uppercase tracking-[0.3em] text-[hsl(var(--hud-foreground))] transition-transform hover:scale-[1.02] active:scale-[0.98]"
         >
-          ▶ Deploy as {CLASSES[soldierClass].name}
+          ▶ Deploy as {CLASSES[soldierClass].name} @ {spawnDefs[spawnIndex].name}
         </button>
       </div>
     </div>
