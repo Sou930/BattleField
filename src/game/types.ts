@@ -210,6 +210,22 @@ export interface Vehicle {
   speed: number;
   team: Team | null;
   destroyed: boolean;
+  // --- Realistic-handling state (added for full vehicle dynamics) ---
+  // Rate of change of heading (rad/s). Smoothed so steering feels weighted.
+  yawRate: number;
+  // Visual chassis attitude driven by weight transfer (radians).
+  // `bodyRoll` = lean into corners, `bodyPitch` = squat/dive on accel & brake.
+  bodyRoll: number;
+  bodyPitch: number;
+  // Vertical suspension travel + its velocity (metres) for terrain/jump bounce.
+  suspension: number;
+  suspensionVel: number;
+  // Normalised engine speed 0..1 (drives engine pitch / exhaust visuals).
+  engineRpm: number;
+  // How much the tyres are sliding sideways 0..1 (drift / skid feedback).
+  slip: number;
+  // Wheel spin phase (radians) accumulated from forward speed.
+  wheelSpin: number;
 }
 
 // === AIRCRAFT ===
@@ -246,6 +262,16 @@ export interface Aircraft {
   aiTimer: number;
   // エンジン音・エフェクト
   engineSmoke: boolean;    // 被弾時の黒煙フラグ
+  // --- 飛行力学用の追加状態 (operator-input smoothing for realistic feel) ---
+  // 操縦桿の平滑化された入力 (-1..1)。慣性で機体がじわっと反応する。
+  pitchInput: number;
+  rollInput: number;
+  // 迎角 (rad)。揚力と失速の計算に使う。
+  aoa: number;
+  // 失速フラグ (表示・挙動用)。
+  stalling: boolean;
+  // 旋回G (表示用 / 誘導抗力計算用)。
+  gForce: number;
 }
 
 export interface AircraftBomb {

@@ -2223,7 +2223,10 @@ function VehiclesScene() {
         g.add(mesh);
       }
       mesh.position.copy(v.pos);
-      mesh.rotation.y = v.yaw;
+      // Body attitude from the physics model: yaw (heading) plus weight-transfer
+      // roll (lean into corners) and pitch (squat under accel / dive on brake).
+      // Use a YXZ Euler so roll/pitch are applied in the chassis-local frame.
+      mesh.rotation.set(v.bodyPitch ?? 0, v.yaw, v.bodyRoll ?? 0, 'YXZ');
       mesh.visible = !v.destroyed;
     }
   });
