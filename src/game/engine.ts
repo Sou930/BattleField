@@ -25,10 +25,15 @@ const CAPTURE_SPEED = 0.18;
 
 // === AIRCRAFT TUNING =======================================================
 const AIRCRAFT_GRAVITY       = 12;    // 失速時の降下力
-const AIRCRAFT_LIFT_SPEED    = 60;    // この速度以上で揚力発生 (m/s)
-const AIRCRAFT_STALL_SPEED   = 40;    // この速度未満で失速
-const AIRCRAFT_MAX_SPEED     = 220;   // 最高速 fighter
-const AIRCRAFT_ATK_MAX_SPEED = 160;   // 最高速 attacker
+const AIRCRAFT_LIFT_SPEED    = 40;    // この速度以上で揚力発生 (m/s) ※低速でも飛べるよう低減
+const AIRCRAFT_STALL_SPEED   = 28;    // この速度未満で失速 ※低速旋回を許すため低減
+// 水平飛行時の最高速 (m/s)。400km/h ≒ 111m/s。降下時はこの値を超えて
+// 加速してよい (重力で速度が増す) ため、水平加速だけを抑える別ロジックで制限する。
+const AIRCRAFT_LEVEL_MAX_SPEED     = 111;  // 水平最高速 fighter (≒400km/h)
+const AIRCRAFT_ATK_LEVEL_MAX_SPEED = 90;   // 水平最高速 attacker (≒324km/h)
+// 物理的な絶対上限 (急降下で出せる最大速)。水平制限よりは高い。
+const AIRCRAFT_MAX_SPEED     = 180;   // 絶対上限 fighter (降下時)
+const AIRCRAFT_ATK_MAX_SPEED = 140;   // 絶対上限 attacker (降下時)
 const AIRCRAFT_GUN_RANGE     = 600;   // 機関銃有効射程
 const AIRCRAFT_GUN_RPM       = 1200;  // 発射レート (rounds/min)
 const AIRCRAFT_GUN_DAMAGE    = 18;
@@ -733,13 +738,17 @@ export class GameEngine {
       ac.rollInput *= Math.pow(0.25, dt); // 手を離すと素早くロール入力が抜ける
 
     // ── ロール入力 → バンク角 ────────────────────────
-    // バンク上限を抑え、入力を離すと自動で水平へ戻る(オートレベリング)ことで
-    // 初心者でも姿勢を保ちやすく、操縦しやすくする。
-    const maxBank = Math.PI * 0.55;
-    ac.roll = THREE.MathUtils.clamp(ac.roll + ac.rollInput * 2.0 * dt, -maxBank, maxBank);
+    // バンク上限を大きく抑え(約45°)、入力を離すと自動で水平へ戻る(オート
+    // レベリング)ことで、過度な旋回を防ぎ初心者でも姿勢を保ちやすくする。
+    const maxBank = Math.PI * 0.25; // ≒45°
+    // ロール速度も控えめにして、急なバンク変化(過度な旋回)を抑制する。
+    ac.roll = THREE.MathUtils.clamp(ac.roll + ac.rollInput * 1.3 * dt, -maxBank, maxBank);
     if (Math.abs(ac.rollInput) < 0.1) ac.roll *= Math.pow(0.18, dt); // 静安定で素早く水平へ
 
     const maxSpd = ac.kind === "fighter" ? AIRCRAFT_MAX_SPEED : AIRCRAFT_ATK_MAX_SPEED;
+    // 水平飛行時の最高速 (≒400km/h)。地上滑走・水平飛行はこの値で頭打ちにし、
+    // 急降下時のみ重力で maxSpd まで超過を許す。
+    const levelMaxSpd = ac.kind === "fighter" ? AIRCRAFT_LEVEL_MAX_SPEED : AIRCRAFT_ATK_LEVEL_MAX_SPEED;
     const thrustMax = ac.kind === "fighter" ? AIRCRAFT_THRUST_FIGHTER : AIRCRAFT_THRUST_ATTACKER;
 
     if (ac.onGround) {
@@ -751,7 +760,7 @@ export class GameEngine {
       const groundDrag = ac.airbrake ? AIRCRAFT_DRAG_COEF * AIRCRAFT_AIRBRAKE_DRAG : AIRCRAFT_DRAG_COEF;
       gSpd *= 1 - groundDrag * gSpd * dt; // drag
       if (ac.airbrake) gSpd = Math.max(0, gSpd - 18 * dt); // エアブレーキで強制制動
-      gSpd = Math.min(gSpd, maxSpd);
+      gSpd = Math.min(gSpd, levelMaxSpd); // 地上滑走も水平最高速で頭打ち
       ac.pitch = 0;
       ac.roll = 0;
       ac.gearDown = true; // 地上滑走中は脚を出している
@@ -795,9 +804,16 @@ export class GameEngine {
       ac.pitch = THREE.MathUtils.clamp(ac.pitch, -Math.PI * 0.49, Math.PI * 0.49);
 
       // ── バンク → 協調旋回: yawRate = g·tan(bank)/v ──
-      if (speed > 5) {
-        const turnRate = (9.8 * Math.tan(ac.roll)) / speed;
-        ac.yaw -= turnRate * dt;
+      // 高速ほど旋回率が下がる本来の式に加え、低速域では機首方向が変えられず
+      // 「浮いたまま向きが変わらない」状態になりがち。これを防ぐため、低速時は
+      // 一定の最小ヨー速度を保証し、バンクを切ればどんな速度でも回頭できるようにする。
+      if (speed > 1) {
+        const coordTurn = (9.8 * Math.tan(ac.roll)) / Math.max(speed, 25);
+        // バンク方向に応じた直接的な最小旋回率 (ラダー的補助)。
+        // 低速ほど効きを強くして、ホバリング気味でも向きを変えられるようにする。
+        const lowSpeedAssist = THREE.MathUtils.clamp((60 - speed) / 60, 0, 1);
+        const directYaw = Math.sin(ac.roll) * (0.5 + lowSpeedAssist * 1.0);
+        ac.yaw -= (coordTurn + directYaw) * dt;
       }
 
       // ── 失速判定 ──
@@ -828,6 +844,21 @@ export class GameEngine {
       if (ac.stalling) {                                              // 失速 → 機首落ち
         ac.pitch -= dt * 0.6;
         ac.vel.y -= AIRCRAFT_GRAVITY * 0.4 * dt;
+      }
+
+      // ── 速度制限 (水平最高速 ≒400km/h) ───────────────────────
+      // 水平〜上昇飛行では levelMaxSpd で頭打ち。降下時は重力で加速できるよう
+      // 降下角に応じて levelMaxSpd → maxSpd まで上限を滑らかに引き上げる。
+      {
+        const curSpeed = ac.vel.length();
+        if (curSpeed > 0.01) {
+          // 降下成分の割合 (0=水平/上昇, 1=ほぼ真下)。
+          const descentFrac = THREE.MathUtils.clamp(-ac.vel.y / curSpeed, 0, 1);
+          const speedCap = levelMaxSpd + (maxSpd - levelMaxSpd) * descentFrac;
+          if (curSpeed > speedCap) {
+            ac.vel.multiplyScalar(speedCap / curSpeed);
+          }
+        }
       }
 
       // ── 位置更新 ──
