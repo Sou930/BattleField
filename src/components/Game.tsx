@@ -6,7 +6,7 @@ import * as THREE from "three";
 import { GameEngine } from "@/game/engine";
 import { store, useGame } from "@/game/store";
 import { Input } from "@/game/input";
-import { generateWorld, WORLD_SIZE, terrainHeightAt } from "@/game/world";
+import { generateWorld, WORLD_SIZE, terrainHeightAt, pavedFlatHeightAt } from "@/game/world";
 import HUD from "./HUD";
 import drumTopUrl from "@/assets/drum_barrel_top.webp";
 import treeLeavesUrl from "@/assets/tree_leaves.webp";
@@ -21,6 +21,8 @@ import groundSandDiffUrl from "@/assets/new/gravelly_sand_diff_1k.webp";
 import roadStoneDiffUrl from "@/assets/new/gravel_floor_diff_1k.webp";
 // --- Asphalt (roads / runway / taxiway / apron) ---
 import asphaltDiffUrl from "@/assets/new/asphalt_track_diff_1k.jpg";
+import asphaltNorUrl from "@/assets/new/asphalt_track_nor_gl_1k.jpg";
+import asphaltRoughUrl from "@/assets/new/asphalt_track_rough_1k.jpg";
 // --- Walls (layered concrete) ---
 import wallDiffUrl from "@/assets/new/concrete_layers_02_diff_1k.webp";
 import wallNorUrl from "@/assets/new/concrete_layers_02_nor_gl_1k.webp";
@@ -87,6 +89,8 @@ const TEXTURE_URLS = [
   groundSandDiffUrl,
   roadStoneDiffUrl,
   asphaltDiffUrl,
+  asphaltNorUrl,
+  asphaltRoughUrl,
   wallDiffUrl,
   wallNorUrl,
   wallRoughUrl,
@@ -535,14 +539,22 @@ function Ground() {
   // extends to the horizon beyond it.
   const geometry = useMemo(() => {
     const extent = WORLD_SIZE * 1.5; // half-size of the detailed terrain patch
-    const segments = 220; // resolution of the displaced grid
+    // Higher grid resolution → smaller cells → far less linear-interpolation
+    // overshoot where the rolling desert meets the dead-level airfield/city, so
+    // the paved decals no longer get swallowed by an over-tall boundary triangle.
+    const segments = 320; // resolution of the displaced grid
     const verts: number[] = [];
     const idx: number[] = [];
     for (let iz = 0; iz <= segments; iz++) {
       for (let ix = 0; ix <= segments; ix++) {
         const x = -extent + (ix / segments) * extent * 2;
         const z = -extent + (iz / segments) * extent * 2;
-        const y = terrainHeightAt(sharedWorld, x, z);
+        // Snap any vertex inside the flattened paved footprint to a true flat
+        // plane. Without this, a tall vertex just outside the flat zone drags
+        // its triangle up across the boundary and the runway/apron appears
+        // half-buried; clamping makes the whole plateau dead level.
+        const flat = pavedFlatHeightAt(x, z);
+        const y = flat !== null ? flat : terrainHeightAt(sharedWorld, x, z);
         verts.push(x, y, z);
       }
     }
@@ -629,63 +641,119 @@ function DustParticles() {
 }
 
 function Roads() {
-  // Asphalt diffuse from assets/new — used for every road, taxiway, apron and
-  // the main runway surface so the paved areas read as real tarmac.
-  const stoneTex = useTiledTexture(asphaltDiffUrl, 1, 12);
-  const mat = useMemo(() => new THREE.ShaderMaterial({
-    uniforms: {
-      stoneTex: { value: stoneTex },
-      fogColor: { value: new THREE.Color("#efd29a") },
-      fogNear: { value: 60 },
-      fogFar: { value: 320 },
-    },
-    vertexShader: `
-      varying vec3 vWorldPos;
-      varying float vFogDepth;
-      void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorldPos = wp.xyz;
-        vec4 mv = viewMatrix * wp;
-        vFogDepth = -mv.z;
-        gl_Position = projectionMatrix * mv;
+  // Real asphalt PBR set from assets/new (diffuse + normal + roughness). All of
+  // it — every road, taxiway, apron and the main runway surface plus the
+  // painted markings — is rendered as genuine tarmac. The maps are sampled in
+  // WORLD space (not per-quad UV) so the texture tiles continuously across the
+  // whole airfield instead of stretching one tile onto each small marking quad.
+  // A light Lambert term driven by a world-space normal map gives the surface
+  // real grain and the roughness map breaks up specular sheen, while each
+  // quad's authored `color` tints the result (dark tarmac, brown dirt road,
+  // bright white paint) so the runway markings stay legible.
+  const diffTex = useTiledTexture(asphaltDiffUrl, 1, 12);
+  const norTex = useTiledTexture(asphaltNorUrl, 1, 12);
+  const roughTex = useTiledTexture(asphaltRoughUrl, 1, 12);
+  // Normal/roughness are linear data maps, not sRGB colour.
+  useMemo(() => {
+    norTex.colorSpace = THREE.NoColorSpace;
+    roughTex.colorSpace = THREE.NoColorSpace;
+    norTex.needsUpdate = true;
+    roughTex.needsUpdate = true;
+  }, [norTex, roughTex]);
+
+  // One material per distinct authored road colour so the asphalt texture can
+  // be tinted appropriately (and so we don't pay for a uniform switch per quad).
+  const matForColor = useMemo(() => {
+    const cache = new Map<string, THREE.ShaderMaterial>();
+    const make = (color: string) =>
+      new THREE.ShaderMaterial({
+        uniforms: {
+          diffTex: { value: diffTex },
+          norTex: { value: norTex },
+          roughTex: { value: roughTex },
+          tint: { value: new THREE.Color(color) },
+          lightDir: { value: new THREE.Vector3(0.45, 0.8, 0.35).normalize() },
+          fogColor: { value: new THREE.Color("#efd29a") },
+          fogNear: { value: 60 },
+          fogFar: { value: 320 },
+        },
+        vertexShader: `
+          varying vec3 vWorldPos;
+          varying float vFogDepth;
+          void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            vec4 mv = viewMatrix * wp;
+            vFogDepth = -mv.z;
+            gl_Position = projectionMatrix * mv;
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D diffTex;
+          uniform sampler2D norTex;
+          uniform sampler2D roughTex;
+          uniform vec3 tint;
+          uniform vec3 lightDir;
+          uniform vec3 fogColor;
+          uniform float fogNear, fogFar;
+          varying vec3 vWorldPos;
+          varying float vFogDepth;
+          float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+          float noise(vec2 p) {
+            vec2 i = floor(p); vec2 f = fract(p);
+            float a = hash(i), b = hash(i+vec2(1,0)), c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
+            vec2 u = f*f*(3.0-2.0*f);
+            return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+          }
+          void main() {
+            vec2 p = vWorldPos.xz;
+            // Asphalt diffuse tiled. Sample at two world scales and blend so the
+            // tarmac doesn't read as an obviously repeating tile across big aprons.
+            vec3 asphaltNear = texture2D(diffTex, p * 0.16).rgb;
+            vec3 asphaltFar  = texture2D(diffTex, p * 0.045).rgb;
+            vec3 stone = mix(asphaltNear, asphaltFar, 0.35);
+
+            // Surface normal from the normal map (sampled in world space) gives
+            // the asphalt real grain. Decode from [0,1] → [-1,1]; the plane's
+            // own normal is +Y, so the map's xy perturb the up-vector.
+            vec3 nTex = texture2D(norTex, p * 0.16).xyz * 2.0 - 1.0;
+            vec3 N = normalize(vec3(nTex.x, 4.0, nTex.y));
+            float diffuse = clamp(dot(N, normalize(lightDir)), 0.0, 1.0);
+            float lambert = 0.72 + 0.5 * diffuse;
+
+            // Roughness map: rougher (high value) → flatter; smoother spots get a
+            // faint sheen, which makes worn/polished tracks read on the tarmac.
+            float rough = texture2D(roughTex, p * 0.16).r;
+            float sheen = (1.0 - rough) * pow(diffuse, 6.0) * 0.18;
+
+            // Tint by the authored colour (tarmac / dirt / paint). Paint quads are
+            // bright so the texture only adds subtle grain; tarmac stays dark.
+            vec3 col = stone * tint * 2.0 * lambert + sheen;
+
+            // Tire marks / scuffing slightly darken along travel direction.
+            float tire = smoothstep(0.55, 0.7, noise(vec2(p.x * 0.4, p.z * 4.0)));
+            col = mix(col, col * 0.9, tire * 0.18);
+
+            float fogF = clamp((vFogDepth - fogNear) / (fogFar - fogNear), 0.0, 1.0);
+            col = mix(col, fogColor, fogF);
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `,
+      });
+    return (color: string) => {
+      let m = cache.get(color);
+      if (!m) {
+        m = make(color);
+        cache.set(color, m);
       }
-    `,
-    fragmentShader: `
-      uniform sampler2D stoneTex;
-      uniform vec3 fogColor;
-      uniform float fogNear, fogFar;
-      varying vec3 vWorldPos;
-      varying float vFogDepth;
-      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float noise(vec2 p) {
-        vec2 i = floor(p); vec2 f = fract(p);
-        float a = hash(i), b = hash(i+vec2(1,0)), c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
-        vec2 u = f*f*(3.0-2.0*f);
-        return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
-      }
-      void main() {
-        vec2 p = vWorldPos.xz;
-        // Asphalt diffuse tiled. Sample at two scales and blend so the tarmac
-        // doesn't read as an obviously repeating tile across big aprons.
-        vec3 asphaltNear = texture2D(stoneTex, p * 0.16).rgb;
-        vec3 asphaltFar  = texture2D(stoneTex, p * 0.045).rgb;
-        vec3 stone = mix(asphaltNear, asphaltFar, 0.35);
-        float dust = noise(p * 0.5) * 0.12;
-        // Lift the dark tarmac a touch so it stays readable under the desert sun.
-        vec3 col = stone * (1.35 + dust * 0.1);
-        // Tire marks / scuffing slightly darken.
-        float tire = smoothstep(0.55, 0.7, noise(vec2(p.x * 0.4, p.z * 4.0)));
-        col = mix(col, col * 0.9, tire * 0.22);
-        float fogF = clamp((vFogDepth - fogNear) / (fogFar - fogNear), 0.0, 1.0);
-        col = mix(col, fogColor, fogF);
-        gl_FragColor = vec4(col, 1.0);
-      }
-    `,
-  }), [stoneTex]);
+      return m;
+    };
+  }, [diffTex, norTex, roughTex]);
+
   return (
     <group>
       {sharedWorld.roads.map((r, i) => (
-        <mesh key={i} position={[r.pos.x, r.pos.y, r.pos.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow material={mat}>
+        <mesh key={i} position={[r.pos.x, r.pos.y, r.pos.z]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow material={matForColor(r.color)}>
           <planeGeometry args={[r.size.x, r.size.z]} />
         </mesh>
       ))}
