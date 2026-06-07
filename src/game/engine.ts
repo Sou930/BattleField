@@ -310,11 +310,25 @@ export class GameEngine {
     //   - ~75% frontline: near the center (PLAZA) staggered toward each team's
     //     side, so both teams collide around the middle of the map.
     //   - ~25% rear: classic home-base spawn.
+    // Snipers preferentially man the explicit high-ground sniper nests at the
+    // desert-rim outposts (高低差を活かした狙撃ポジション). When a post is chosen
+    // the soldier deploys directly onto the elevated nest/berm so the AI
+    // actually exploits the authored elevation advantage. `manPost` (when set)
+    // overrides the resolved spawn position/facing further below.
+    const manPost =
+      cls === "sniper" && this.world.sniperPosts.length > 0 && Math.random() < 0.55
+        ? this.world.sniperPosts[Math.floor(Math.random() * this.world.sniperPosts.length)]
+        : null;
+
     const frontline = Math.random() < 0.75;
     let baseX: number;
     let baseZ: number;
     let radius: number;
-    if (frontline) {
+    if (manPost) {
+      baseX = manPost.pos.x;
+      baseZ = manPost.pos.z;
+      radius = 0;
+    } else if (frontline) {
       // Frontline band: close to center, offset toward this team's side so they
       // advance into each other. blue comes from +Z (south), red from -Z (north).
       const sign = team === "blue" ? 1 : -1;
@@ -327,11 +341,19 @@ export class GameEngine {
       baseX = (Math.random() - 0.5) * 60;
       radius = 25;
     }
-    const spawn = this.findSpawnNear(baseX, baseZ, radius);
+    // When manning a sniper post, deploy at the post's X/Z on the raised
+    // outpost mound (its elevation is part of the terrain, so terrainHeightAt
+    // gives the soldier the high-ground advantage automatically) and face the
+    // post's overwatch lane. Otherwise resolve a normal collision-free spawn.
+    const spawn = manPost
+      ? new THREE.Vector3(manPost.pos.x, 0, manPost.pos.z)
+      : this.findSpawnNear(baseX, baseZ, radius);
+    const spawnY = terrainHeightAt(this.world, spawn.x, spawn.z) + SOLDIER_HEIGHT;
+    const spawnYaw = manPost ? manPost.yaw : team === "blue" ? Math.PI : 0;
     const s: Soldier = {
       id: this.state.nextSoldierId++,
       team,
-      pos: new THREE.Vector3(spawn.x, terrainHeightAt(this.world, spawn.x, spawn.z) + SOLDIER_HEIGHT, spawn.z),
+      pos: new THREE.Vector3(spawn.x, spawnY, spawn.z),
       vel: new THREE.Vector3(),
       hp: classSpec.hpMax,
       hpMax: classSpec.hpMax,
@@ -339,7 +361,7 @@ export class GameEngine {
       lastShotAt: 0,
       state: "patrol",
       patrolTarget: new THREE.Vector3(spawn.x, 0, spawn.z),
-      yaw: team === "blue" ? Math.PI : 0,
+      yaw: spawnYaw,
       targetId: null,
       coverTarget: null,
       coverTimer: 0,
@@ -352,7 +374,7 @@ export class GameEngine {
       nextTacticalDecisionAt: 0,
       lastGrenadeAt: -10,
       lastSmokeAt: -10,
-      desiredYaw: team === "blue" ? Math.PI : 0,
+      desiredYaw: spawnYaw,
       moveDir: new THREE.Vector3(),
       lastThreatDir: null,
       stuckTimer: 0,
