@@ -151,8 +151,8 @@ const CITADEL_HEIGHT = 34 * MAP_SCALE;
 // same center so the home base and the airfield are one facility.
 export const AIRFIELD_CENTER_X = -WORLD_SIZE * 0.26;
 export const AIRFIELD_CENTER_Z = 0;
-const AIRFIELD_FLAT_HALF_X = WORLD_SIZE * 0.24;
-const AIRFIELD_FLAT_HALF_Z = WORLD_SIZE * 0.4;
+export const AIRFIELD_FLAT_HALF_X = WORLD_SIZE * 0.24;
+export const AIRFIELD_FLAT_HALF_Z = WORLD_SIZE * 0.4;
 
 // --- Deterministic value-noise field used for the continuous base terrain ---
 function hash2(ix: number, iz: number): number {
@@ -1153,8 +1153,18 @@ export function generateWorld(): World {
   // small base offset is kept so the strip renders just above the dirt. (The
   // airfield, city core and base are already flattened, so this only matters
   // along the connecting desert roads.)
+  //
+  // The rendered terrain is a coarse displaced grid that linearly interpolates
+  // BETWEEN vertices, so on rolling ground the mesh surface can bulge a little
+  // above the analytic `groundAt` height mid-cell. A thin road decal seated at
+  // exactly groundAt would then get swallowed by that bulge and look buried.
+  // Authored airfield decals already carry their own tall clearance (y≥0.3);
+  // for the low desert connector roads we lift them by a larger minimum so they
+  // clear the worst-case mesh interpolation and always read as sitting on top.
   for (const r of roads) {
-    r.pos.y = groundAt(r.pos.x, r.pos.z) + Math.max(0.02, r.pos.y);
+    const isPaved = pavedFlatHeightAt(r.pos.x, r.pos.z) !== null;
+    const minClear = isPaved ? 0.02 : 0.18;
+    r.pos.y = groundAt(r.pos.x, r.pos.z) + Math.max(minClear, r.pos.y);
   }
 
   // === Aircraft runway spawn points =====================================
@@ -2357,6 +2367,26 @@ function insideAnyBuilding(p: THREE.Vector3, buildings: Building[], pad: number)
     }
   }
   return false;
+}
+
+// Returns the dead-level paved height (≈0) if (x,z) lies inside the fully
+// flattened airfield / base rectangle, otherwise null. The detailed terrain
+// mesh is a coarse displaced grid, so a vertex just OUTSIDE the flattened zone
+// is tall and its triangle interpolates a height well above 0 as it crosses
+// INTO the flat zone — which made the runway / apron look half-buried. The
+// renderer uses this to SNAP every mesh vertex inside the (slightly expanded)
+// paved footprint to a true flat plane, so the asphalt always sits cleanly on
+// top of the ground with no interpolation overshoot poking through it.
+export function pavedFlatHeightAt(x: number, z: number): number | null {
+  const adx = Math.abs(x - AIRFIELD_CENTER_X);
+  const adz = Math.abs(z - AIRFIELD_CENTER_Z);
+  // Expand the snap region a touch past the flat half-extents so the hard-flat
+  // plateau fully contains the apron and the boundary triangles are level too.
+  const margin = 24;
+  if (adx < AIRFIELD_FLAT_HALF_X + margin && adz < AIRFIELD_FLAT_HALF_Z + margin) {
+    return 0;
+  }
+  return null;
 }
 
 export function terrainHeightAt(world: World, x: number, z: number) {

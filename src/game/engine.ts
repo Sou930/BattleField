@@ -118,6 +118,11 @@ export class GameEngine {
   private lastShotSound = 0;
   private lastHitSound = 0;
   private emitTimer = 0;
+  // Free-look glance offset (radians) applied on top of the vehicle heading
+  // while driving, so the mouse can look around the cab without losing the
+  // forward-tracking driver view. Recentred toward 0 when the mouse is idle.
+  private vehicleLookYaw = 0;
+  private vehicleLookPitch = 0;
 
   constructor(state: GameState, input: GameEngine["input"], world: World) {
     this.state = state;
@@ -552,6 +557,25 @@ export class GameEngine {
     // owns the mouse delta + weapon firing, so skip the on-foot FPS handling.
     if (this.state.playerInAircraft) return;
 
+    // While driving a ground vehicle, the camera tracks the vehicle heading
+    // (updatePlayerVehicle owns p.yaw/p.pitch). The mouse instead drives a small
+    // free-look OFFSET so the player can glance around the cab without losing
+    // the forward view. Consume the delta here so the on-foot look below does
+    // not also move the camera.
+    if (this.state.playerInVehicle) {
+      const md = this.input.consumeMouseDelta();
+      const sens = 0.0022;
+      this.vehicleLookYaw = THREE.MathUtils.clamp(
+        this.vehicleLookYaw - md.dx * sens, -1.4, 1.4);
+      this.vehicleLookPitch = THREE.MathUtils.clamp(
+        this.vehicleLookPitch - md.dy * sens, -0.6, 0.6);
+      // Recenter the glance back toward straight-ahead when the mouse is idle.
+      const recenter = Math.min(1, 2.5 * dt);
+      this.vehicleLookYaw *= 1 - recenter;
+      this.vehicleLookPitch *= 1 - recenter;
+      return;
+    }
+
     const wantAim = this.input.mouse.right && this.state.currentWeapon !== "grenade" && this.state.currentWeapon !== "smoke";
     this.state.aiming = wantAim;
     const targetT = wantAim ? 1 : 0;
@@ -636,6 +660,9 @@ export class GameEngine {
     this.state.playerInVehicle = v.id;
     v.team = "blue";
     this.state.vehicleViewMode = "third"; // 搭乗時は三人称から開始
+    // 搭乗時はフリールックのオフセットを中央へリセットし、まず正面を向かせる。
+    this.vehicleLookYaw = 0;
+    this.vehicleLookPitch = 0;
     soundEngine.playVehicleEnter();
   }
 
@@ -1643,9 +1670,10 @@ export class GameEngine {
       : v.kind === "truck" ? 2.4
       : v.kind === "humvee" ? 2.0
       : 1.8;
+    // Vehicle forward (travel) direction.
+    const fwdV = new THREE.Vector3(-Math.sin(v.yaw), 0, -Math.cos(v.yaw));
     if (this.state.vehicleViewMode === "third") {
       // 三人称: 車体後方上方からのチェイスカメラ。前進方向の逆へ下げる。
-      const fwdV = new THREE.Vector3(-Math.sin(v.yaw), 0, -Math.cos(v.yaw));
       const dist = v.kind === "tank" ? 11 : v.kind === "apc" || v.kind === "truck" ? 10 : 8;
       const height = v.kind === "tank" || v.kind === "apc" || v.kind === "truck" ? 5 : 4;
       p.pos.set(
@@ -1654,8 +1682,32 @@ export class GameEngine {
         v.pos.z - fwdV.z * dist,
       );
     } else {
-      p.pos.set(v.pos.x, v.pos.y + seatH, v.pos.z);
+      // 一人称(操縦手視点): 視点を運転席まで前進方向へ少し進め、ボンネット/
+      // 砲塔の前方に置く。車体に埋もれず前がしっかり見えるようにする。
+      const fwdSeat = v.kind === "tank" ? 1.2
+        : v.kind === "apc" || v.kind === "truck" ? 1.6
+        : 1.4;
+      p.pos.set(
+        v.pos.x + fwdV.x * fwdSeat,
+        v.pos.y + seatH,
+        v.pos.z + fwdV.z * fwdSeat,
+      );
     }
+    // カメラの向きを車体の進行方向に追従させる。これがないとハンドルを切っても
+    // 視点が回らず、明後日の方向を向いたまま運転することになり非常に見にくい。
+    // ステア中はヨーレートぶん先読みして向けると、より自然に曲がる先が見える。
+    // マウスのフリールック量 (vehicleLookYaw/Pitch) を進行方向に上乗せして、
+    // 前を見据えたまま周囲を少しだけ見回せるようにする。
+    const targetYaw = v.yaw + v.yawRate * 0.25 + this.vehicleLookYaw;
+    // 角度の差を [-PI, PI] に正規化してから滑らかに追従(急な反転を防ぐ)。
+    let dYaw = targetYaw - p.yaw;
+    while (dYaw > Math.PI) dYaw -= Math.PI * 2;
+    while (dYaw < -Math.PI) dYaw += Math.PI * 2;
+    p.yaw += dYaw * Math.min(1, 12 * dt);
+    // 水平基準のわずかな見下ろし。第一人称はほぼ水平、第三人称は少し見下ろす。
+    const basePitch = this.state.vehicleViewMode === "third" ? -0.12 : -0.02;
+    const camTargetPitch = basePitch + this.vehicleLookPitch;
+    p.pitch += (camTargetPitch - p.pitch) * Math.min(1, 10 * dt);
     p.vel.set(0, 0, 0);
     p.onGround = true;
   }
