@@ -2721,6 +2721,28 @@ export default function Game() {
     setEngine(eng);
   }, []);
 
+  // Keep a JS-measured viewport height in `--app-height` as a fallback for
+  // browsers that don't support the dynamic-viewport `dvh` unit. `window.
+  // innerHeight` always reflects the *visible* area (excluding the mobile
+  // address/tool bars), so this prevents the `100vh`-overflow scroll problem
+  // on mobile. It updates on resize and orientation changes.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const setAppHeight = () => {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        `${window.innerHeight}px`,
+      );
+    };
+    setAppHeight();
+    window.addEventListener("resize", setAppHeight);
+    window.addEventListener("orientationchange", setAppHeight);
+    return () => {
+      window.removeEventListener("resize", setAppHeight);
+      window.removeEventListener("orientationchange", setAppHeight);
+    };
+  }, []);
+
   const showLoadout = () => {
     store.reset();
     store.state.status = "loadout";
@@ -2745,7 +2767,10 @@ export default function Game() {
   const showCanvas = status !== "menu" && status !== "loadout";
 
   return (
-    <div ref={containerRef} className="relative h-screen w-screen overflow-hidden bg-background">
+    <div
+      ref={containerRef}
+      className="game-root relative w-screen overflow-hidden bg-background"
+    >
       <div className="absolute inset-0 z-0">
         {showCanvas && (
           <Canvas

@@ -107,4 +107,61 @@ All colors MUST be HSL.
   body {
     @apply bg-background text-foreground;
   }
+
+  /* ----------------------------------------------------------------------
+   * Mobile viewport / no-scroll fixes
+   * --------------------------------------------------------------------
+   * On mobile browsers `100vh` includes the dynamic address/tool bars, so a
+   * `h-screen` container becomes TALLER than the visible area and the page
+   * scrolls (and rubber-bands). We lock the document to the *visible*
+   * viewport instead:
+   *   - `--app-height` is a JS-measured fallback (see Game.tsx) for browsers
+   *     without `dvh` support.
+   *   - `position: fixed` + `overflow: hidden` on html/body removes any page
+   *     scroll, and `overscroll-behavior: none` kills pull-to-refresh / bounce.
+   *   - `touch-action: none` prevents the browser from treating touch drags
+   *     (joystick / look-pad) as scroll/zoom gestures.
+   */
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    position: fixed;
+    inset: 0;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+  }
+
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    touch-action: none;
+  }
+
+  /* The root game container. Height resolves in this order of preference:
+   *   1. `100vh`            — universal baseline.
+   *   2. `var(--app-height)`— JS-measured visible height (set in Game.tsx),
+   *                           correct on mobile where 100vh overshoots.
+   *   3. `100dvh`           — dynamic viewport unit on supporting browsers,
+   *                           the most accurate and resize-free option.
+   * Each later rule overrides the previous one only when supported, so we get
+   * the best available behaviour with safe fallbacks.
+   */
+  .game-root {
+    height: 100vh;
+    height: var(--app-height, 100vh);
+  }
+
+  @supports (height: 100dvh) {
+    .game-root {
+      height: 100dvh;
+    }
+  }
 }
