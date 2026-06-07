@@ -73,7 +73,11 @@ const AIRCRAFT_LIFT_COEF      = 0.0016; // 揚力係数 (×v^2)
 const AIRCRAFT_DRAG_COEF      = 0.00022;// 寄生抗力係数 (×v^2)
 const AIRCRAFT_INDUCED_DRAG   = 0.9;    // 誘導抗力 (旋回G依存)
 const AIRCRAFT_STALL_AOA      = 0.32;   // 失速迎角 (rad ≈ 18°)
-const AIRCRAFT_CTRL_EASE      = 4.5;    // 操縦入力の追従速度 (慣性感)
+const AIRCRAFT_CTRL_EASE      = 6.5;    // 操縦入力の追従速度 (慣性感: 大きいほど機敏)
+// エアブレーキ展開時に寄生抗力へ掛ける倍率。大きいほどよく止まる。
+const AIRCRAFT_AIRBRAKE_DRAG  = 5.0;
+// ランディングギア展開時の追加抗力 (×v^2)。脚を出すと少し減速する。
+const AIRCRAFT_GEAR_DRAG_COEF = 0.00010;
 
 // Reusable temp vectors to reduce allocations in hot paths
 const _tmpV1 = new THREE.Vector3();
@@ -100,6 +104,8 @@ export class GameEngine {
     vehicleBrake?: boolean;
     mapTogglePressed?: boolean;
     viewTogglePressed?: boolean;
+    aircraftAirbrake?: boolean;
+    gearTogglePressed?: boolean;
   };
   shootHeld = false;
   spawnPoints: SpawnPoint[] = [];
@@ -669,6 +675,10 @@ export class GameEngine {
       closest.pitch = 0;
       closest.roll = 0;
       closest.onGround = true;
+      closest.airbrake = false;
+      closest.gearDown = true; // 地上待機なので脚は出した状態
+      // 徒歩中に押された F が残っていると搭乗直後に脚が引っ込むため消費する。
+      this.input.gearTogglePressed = false;
       closest.aiState = "taxiing";
       closest.aiTargetSoldierId = null;
       closest.aiTargetPos = null;
@@ -694,8 +704,12 @@ export class GameEngine {
     // マウス: ピッチ & ロール指令。WASD: スロットル & ロール補助。
     const md = this.input.consumeMouseDelta();
     const sens = 0.0016;
-    const pitchCmd = THREE.MathUtils.clamp(ac.pitchInput - md.dy * sens * 90, -1, 1);
-    let rollCmd = THREE.MathUtils.clamp(ac.rollInput + md.dx * sens * 90, -1, 1);
+    // デッドゾーン: わずかな手ブレ/微振動では舵を切らない (やさしい操縦)。
+    const dyEff = Math.abs(md.dy) < 0.6 ? 0 : md.dy;
+    const dxEff = Math.abs(md.dx) < 0.6 ? 0 : md.dx;
+    // 入力ゲインを控えめ(90→55)にして、急な視点移動でも機体が暴れにくくする。
+    const pitchCmd = THREE.MathUtils.clamp(ac.pitchInput - dyEff * sens * 55, -1, 1);
+    let rollCmd = THREE.MathUtils.clamp(ac.rollInput + dxEff * sens * 55, -1, 1);
 
     if (this.input.keys.has("KeyW"))
       ac.throttle = Math.min(1, ac.throttle + 0.8 * dt);
@@ -703,16 +717,27 @@ export class GameEngine {
       ac.throttle = Math.max(0, ac.throttle - 0.8 * dt);
     if (this.input.keys.has("KeyA")) rollCmd = -1;
     if (this.input.keys.has("KeyD")) rollCmd = 1;
+
+    // ── エアブレーキ (Shift/B 押下中、またはモバイルの AIR BRAKE ホールド) ──
+    ac.airbrake = !!this.input.aircraftAirbrake;
+    // ── ランディングギア(脚)の出し入れ (F / モバイルの GEAR ボタン) ──
+    if (this.input.gearTogglePressed) {
+      ac.gearDown = !ac.gearDown;
+      this.input.gearTogglePressed = false;
+    }
+
     // 操縦桿を慣性で追従 (操縦の重さ)。
     ac.pitchInput += (pitchCmd - ac.pitchInput) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
     ac.rollInput  += (rollCmd  - ac.rollInput ) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
-    if (!this.input.keys.has("KeyA") && !this.input.keys.has("KeyD") && Math.abs(md.dx) < 0.5)
-      ac.rollInput *= Math.pow(0.4, dt);
+    if (!this.input.keys.has("KeyA") && !this.input.keys.has("KeyD") && Math.abs(dxEff) < 0.5)
+      ac.rollInput *= Math.pow(0.25, dt); // 手を離すと素早くロール入力が抜ける
 
     // ── ロール入力 → バンク角 ────────────────────────
-    const maxBank = Math.PI * 0.7;
-    ac.roll = THREE.MathUtils.clamp(ac.roll + ac.rollInput * 2.2 * dt, -maxBank, maxBank);
-    if (Math.abs(ac.rollInput) < 0.1) ac.roll *= Math.pow(0.5, dt); // 静安定で水平へ
+    // バンク上限を抑え、入力を離すと自動で水平へ戻る(オートレベリング)ことで
+    // 初心者でも姿勢を保ちやすく、操縦しやすくする。
+    const maxBank = Math.PI * 0.55;
+    ac.roll = THREE.MathUtils.clamp(ac.roll + ac.rollInput * 2.0 * dt, -maxBank, maxBank);
+    if (Math.abs(ac.rollInput) < 0.1) ac.roll *= Math.pow(0.18, dt); // 静安定で素早く水平へ
 
     const maxSpd = ac.kind === "fighter" ? AIRCRAFT_MAX_SPEED : AIRCRAFT_ATK_MAX_SPEED;
     const thrustMax = ac.kind === "fighter" ? AIRCRAFT_THRUST_FIGHTER : AIRCRAFT_THRUST_ATTACKER;
@@ -722,20 +747,26 @@ export class GameEngine {
       const groundFwd = new THREE.Vector3(-Math.sin(ac.yaw), 0, -Math.cos(ac.yaw));
       let gSpd = ac.vel.length();
       gSpd += ac.throttle * thrustMax * dt;
-      gSpd *= 1 - AIRCRAFT_DRAG_COEF * gSpd * dt; // drag
+      // エアブレーキ展開中は地上でも強く減速する (着陸後の停止に有効)。
+      const groundDrag = ac.airbrake ? AIRCRAFT_DRAG_COEF * AIRCRAFT_AIRBRAKE_DRAG : AIRCRAFT_DRAG_COEF;
+      gSpd *= 1 - groundDrag * gSpd * dt; // drag
+      if (ac.airbrake) gSpd = Math.max(0, gSpd - 18 * dt); // エアブレーキで強制制動
       gSpd = Math.min(gSpd, maxSpd);
       ac.pitch = 0;
       ac.roll = 0;
+      ac.gearDown = true; // 地上滑走中は脚を出している
       ac.vel.copy(groundFwd).multiplyScalar(gSpd);
       ac.pos.addScaledVector(ac.vel, dt);
       ac.pos.y = 0.8;
       // 離陸 (ローテーション): 操縦桿を引けば揚力速度で、引かなくても十分速度が
-      // 乗れば自然に浮く。これにより W だけでも離陸できる。
+      // 乗れば自然に浮く。これにより W だけでも離陸できる。エアブレーキ展開中は
+      // 離陸しない (誤離陸防止)。
       const rotateSpeed = ac.pitchInput > 0.15 ? AIRCRAFT_LIFT_SPEED : AIRCRAFT_LIFT_SPEED * 1.15;
-      if (gSpd > rotateSpeed) {
+      if (gSpd > rotateSpeed && !ac.airbrake) {
         ac.onGround = false;
         ac.pitch = Math.max(0.12, ac.pitch);
         ac.vel.y = 4;
+        ac.gearDown = false; // 離陸したら自動で脚を格納
       }
       const lim0 = WORLD_SIZE / 2 - 20;
       ac.pos.x = Math.max(-lim0, Math.min(lim0, ac.pos.x));
@@ -781,10 +812,14 @@ export class GameEngine {
       // 旋回G (誘導抗力 & HUD表示用)。
       ac.gForce = 1 / Math.max(0.2, Math.cos(ac.roll));
 
-      // ── 抗力: 寄生抗力 + 誘導抗力 ──
-      const parasiticDrag = AIRCRAFT_DRAG_COEF * speed * speed;
+      // ── 抗力: 寄生抗力 + 誘導抗力 + エアブレーキ + 脚 ──
+      // エアブレーキ展開で寄生抗力が増し、機体が素早く減速する。ランディング
+      // ギアを出すと追加の抗力が生じ、降下・進入速度を落としやすくなる。
+      const brakeMul = ac.airbrake ? AIRCRAFT_AIRBRAKE_DRAG : 1;
+      const parasiticDrag = AIRCRAFT_DRAG_COEF * brakeMul * speed * speed;
+      const gearDrag = ac.gearDown ? AIRCRAFT_GEAR_DRAG_COEF * speed * speed : 0;
       const inducedDrag = AIRCRAFT_INDUCED_DRAG * Math.abs(ac.aoa) * Math.max(0, ac.gForce - 1) * 4;
-      const dragMag = parasiticDrag + inducedDrag;
+      const dragMag = parasiticDrag + gearDrag + inducedDrag;
 
       // ── 力を積分 ──
       ac.vel.addScaledVector(fwd, ac.throttle * thrustMax * dt);     // 推力
@@ -808,7 +843,12 @@ export class GameEngine {
         const horizSpeed = Math.hypot(ac.vel.x, ac.vel.z);
         const sinkRate = -ac.vel.y;
         // 低速・低降下率・水平姿勢なら着陸成功、さもなくば墜落。
-        if (horizSpeed < 75 && sinkRate < 12 && Math.abs(ac.pitch) < 0.25 && Math.abs(ac.roll) < 0.3) {
+        // ランディングギアを出していると着陸判定が大幅に緩くなる (やさしい着陸)。
+        const okSpeed = ac.gearDown ? 110 : 75;
+        const okSink  = ac.gearDown ? 20  : 12;
+        const okPitch = ac.gearDown ? 0.40 : 0.25;
+        const okRoll  = ac.gearDown ? 0.45 : 0.3;
+        if (horizSpeed < okSpeed && sinkRate < okSink && Math.abs(ac.pitch) < okPitch && Math.abs(ac.roll) < okRoll) {
           ac.onGround = true;
           ac.vel.set(0, 0, 0);
           ac.pitch = 0;
@@ -2541,6 +2581,8 @@ export class GameEngine {
         aoa: 0,
         stalling: false,
         gForce: 1,
+        airbrake: false,
+        gearDown: true,   // 地上待機中は脚を出している
       };
       this.state.aircraft.push(ac);
     }

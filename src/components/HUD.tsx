@@ -268,18 +268,43 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
           {myAircraft.stalling && (
             <div className="mt-1 text-red-400 font-bold animate-pulse">⚠ STALL 失速</div>
           )}
+          {/* ランディングギア / エアブレーキ 状態表示 */}
+          <div className="mt-1 flex gap-2 text-[10px]">
+            <span className={myAircraft.gearDown ? "text-emerald-300" : "text-gray-500"}>
+              GEAR {myAircraft.gearDown ? "▼DOWN" : "▲UP"}
+            </span>
+            <span className={myAircraft.airbrake ? "text-amber-300 font-bold" : "text-gray-500"}>
+              {myAircraft.airbrake ? "■AIRBRAKE" : "□BRAKE"}
+            </span>
+          </div>
           <div>GUN  {myAircraft.gunAmmo}/{myAircraft.gunAmmoMax}</div>
           {myAircraft.kind === "attacker" && (
             <div>BOMB {myAircraft.bombCount}/{myAircraft.bombMax}</div>
           )}
           <div className="mt-2 text-gray-400 text-[10px] leading-4">
-            W/S スロットル<br />
-            A/D バンク<br />
-            マウス 機首操作<br />
-            左クリック 機関銃<br />
-            {myAircraft.kind === "attacker" && (<>SPACE 爆弾投下<br /></>)}
-            V 視点切替<br />
-            G 脱出
+            {isMobile ? (
+              <>
+                左スティック 旋回補助<br />
+                右ドラッグ 機首操作<br />
+                THR± スロットル<br />
+                BRAKE エアブレーキ<br />
+                GEAR 脚 出し入れ<br />
+                FIRE 機関銃<br />
+                {myAircraft.kind === "attacker" && (<>BOMB 爆弾投下<br /></>)}
+                VIEW 視点 · ✈ 脱出
+              </>
+            ) : (
+              <>
+                W/S スロットル<br />
+                A/D バンク<br />
+                マウス 機首操作<br />
+                左クリック 機関銃<br />
+                {myAircraft.kind === "attacker" && (<>SPACE 爆弾投下<br /></>)}
+                Shift/B エアブレーキ<br />
+                F ランディングギア<br />
+                V 視点切替 · G 脱出
+              </>
+            )}
           </div>
         </div>
       )}
@@ -485,11 +510,34 @@ function MobileControls({
 }) {
   return (
     <>
-      {/* Aircraft enter/exit button (徒歩で機体が近い時、または搭乗中) */}
+      {/* Movement joystick (left) - works for both on-foot and vehicle */}
+      <Joystick
+        side="left"
+        onChange={(v) => input.current?.setTouchMove(v)}
+        onRelease={() => input.current?.setTouchMove({ x: 0, y: 0 })}
+      />
+      {/* Look area (right half of screen).
+          NOTE: must be rendered BEFORE the action buttons so the buttons
+          stack on top of it and reliably receive taps. Previously the LookPad
+          was rendered last and covered the aircraft ENTER button, making it
+          unpressable on mobile. */}
+      <LookPad onDelta={(dx, dy) => input.current?.addTouchLook(dx, dy)} />
+
+      {/* Aircraft enter/exit button (徒歩で機体が近い時、または搭乗中).
+          搭乗中は脚を出して着陸しないと判定が出にくいので機体側で処理。
+          視点(LookPad)より後に描画することで確実にタップを拾えるようにする。 */}
       {(hasAircraft || inAircraft) && (
         <button
-          className="pointer-events-auto absolute right-4 bottom-40 w-14 h-14 rounded-full bg-gray-700/80 text-white text-lg flex items-center justify-center active:bg-gray-500"
-          onPointerDown={() => { if (input?.current) input.current.aircraftEnterPressed = true; }}
+          className="pointer-events-auto absolute right-4 bottom-44 z-30 w-16 h-16 rounded-full border-2 border-white/40 bg-gray-700/85 text-white text-2xl flex items-center justify-center shadow-lg active:scale-95 active:bg-gray-500"
+          onTouchStart={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (input?.current) input.current.aircraftEnterPressed = true;
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (input?.current) input.current.aircraftEnterPressed = true;
+          }}
         >
           ✈
         </button>
@@ -497,23 +545,26 @@ function MobileControls({
       {/* 視点切り替えボタン (車両・航空機 搭乗中のみ) */}
       {(inVehicle || inAircraft) && (
         <button
-          className="pointer-events-auto absolute right-20 bottom-40 w-14 h-14 rounded-full bg-sky-700/80 text-white text-xs font-bold flex items-center justify-center active:bg-sky-500"
-          onPointerDown={() => { if (input?.current) input.current.viewTogglePressed = true; }}
+          className="pointer-events-auto absolute right-24 bottom-44 z-30 w-14 h-14 rounded-full border-2 border-white/40 bg-sky-700/85 text-white text-xs font-bold flex items-center justify-center shadow-lg active:scale-95 active:bg-sky-500"
+          onTouchStart={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (input?.current) input.current.viewTogglePressed = true;
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (input?.current) input.current.viewTogglePressed = true;
+          }}
         >
           VIEW
         </button>
       )}
-      {/* Movement joystick (left) - works for both on-foot and vehicle */}
-      <Joystick
-        side="left"
-        onChange={(v) => input.current?.setTouchMove(v)}
-        onRelease={() => input.current?.setTouchMove({ x: 0, y: 0 })}
-      />
-      {/* Look area (right half of screen) */}
-      <LookPad onDelta={(dx, dy) => input.current?.addTouchLook(dx, dy)} />
+
+      {/* ===== Aircraft flight controls (搭乗中のみ) ===== */}
+      {inAircraft && <AircraftControls input={input} />}
 
       {/* On-foot controls */}
-      {!inVehicle && (
+      {!inVehicle && !inAircraft && (
         <div className="pointer-events-none absolute bottom-32 right-4 flex flex-col items-end gap-3">
           <TouchButton
             label="FIRE"
@@ -596,14 +647,14 @@ function MobileControls({
       )}
 
       {/* AIM toggle (on-foot only) */}
-      {!inVehicle && (
+      {!inVehicle && !inAircraft && (
         <div className="pointer-events-none absolute bottom-60 left-6 flex flex-col gap-2">
           <AimToggle input={input} />
         </div>
       )}
 
       {/* Weapon switch buttons (on-foot only) */}
-      {!inVehicle && (
+      {!inVehicle && !inAircraft && (
         <div className="pointer-events-auto absolute right-3 top-24 flex flex-col gap-1">
           {([1, 2, 3, 4, 5] as const).map((n) => (
             <button
@@ -621,6 +672,136 @@ function MobileControls({
         </div>
       )}
     </>
+  );
+}
+
+// ===== AIRCRAFT FLIGHT CONTROLS (mobile) =====
+// 搭乗中だけ表示する操縦パネル。スロットル(+/-)・エアブレーキ(ホールド)・
+// ランディングギア(トグル)・機銃(ホールド)・爆弾(attacker のみ)。
+// 視点(LookPad)はそのままピッチ/ロール操縦に使われる。
+function AircraftControls({ input }: { input: MutableRefObject<Input | null> }) {
+  const aircraft = useGame((s) => s.aircraft);
+  const acId = useGame((s) => s.playerInAircraft);
+  const ac = acId ? aircraft.find((a) => a.id === acId) : null;
+
+  const setKey = (code: string, on: boolean) => {
+    const inp = input.current;
+    if (!inp) return;
+    if (on) inp.keys.add(code);
+    else inp.keys.delete(code);
+  };
+
+  return (
+    <>
+      {/* Throttle controls (left, above the joystick) */}
+      <div className="pointer-events-none absolute bottom-60 left-6 z-20 flex flex-col gap-2">
+        <HoldButton
+          label="THR +"
+          color="hsl(var(--health))"
+          onHold={(on) => setKey("KeyW", on)}
+        />
+        <HoldButton
+          label="THR −"
+          color="hsl(var(--ammo))"
+          onHold={(on) => setKey("KeyS", on)}
+        />
+      </div>
+
+      {/* Right cluster: FIRE + AIR BRAKE + GEAR + BOMB */}
+      <div className="pointer-events-none absolute bottom-32 right-4 z-20 flex flex-col items-end gap-3">
+        <HoldButton
+          label="FIRE"
+          color="hsl(var(--danger))"
+          big
+          onHold={(on) => input.current?.setFire(on)}
+        />
+        <div className="flex items-end gap-2">
+          {/* AIR BRAKE: hold to deploy */}
+          <HoldButton
+            label="BRAKE"
+            color="hsl(var(--ammo))"
+            onHold={(on) => input.current?.setAircraftAirbrake(on)}
+          />
+          {/* GEAR: toggle landing gear */}
+          <button
+            className={cn(
+              "pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full border-2 text-[10px] font-bold uppercase tracking-wider text-white shadow-lg backdrop-blur-sm active:scale-95",
+              ac?.gearDown
+                ? "border-emerald-300 bg-emerald-600/80"
+                : "border-white/40 bg-slate-700/80",
+            )}
+            onTouchStart={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              input.current?.pressGearToggle();
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              input.current?.pressGearToggle();
+            }}
+          >
+            {ac?.gearDown ? "GEAR▼" : "GEAR▲"}
+          </button>
+        </div>
+        {/* BOMB (attacker のみ) */}
+        {ac?.kind === "attacker" && (
+          <button
+            className="pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full border-2 border-orange-300 bg-orange-600/80 text-[10px] font-bold uppercase tracking-wider text-white shadow-lg backdrop-blur-sm active:scale-95"
+            onTouchStart={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              input.current?.keys.add("Space");
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              input.current?.keys.add("Space");
+            }}
+          >
+            BOMB
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+// A button that reports press/release state via onHold(true/false).
+// Robust on mobile (touch) and desktop (mouse): always releases on end/cancel.
+function HoldButton({
+  label,
+  color = "hsl(var(--hud))",
+  big = false,
+  onHold,
+}: {
+  label: string;
+  color?: string;
+  big?: boolean;
+  onHold: (on: boolean) => void;
+}) {
+  return (
+    <button
+      className={cn(
+        "pointer-events-auto rounded-full border-2 border-white/40 font-bold uppercase tracking-wider text-white shadow-lg backdrop-blur-sm active:scale-95",
+        big ? "h-20 w-20 text-sm" : "h-14 w-14 text-[10px]",
+      )}
+      style={{ background: `${color}` }}
+      onTouchStart={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onHold(true);
+      }}
+      onTouchEnd={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onHold(false);
+      }}
+      onTouchCancel={() => onHold(false)}
+      onMouseDown={() => onHold(true)}
+      onMouseUp={() => onHold(false)}
+      onMouseLeave={() => onHold(false)}
+    >
+      {label}
+    </button>
   );
 }
 
