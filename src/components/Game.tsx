@@ -183,9 +183,61 @@ function useTiledPBR(
   }, [diff, nor, rough, repeatX, repeatY, anisotropy]);
 }
 
+// Build a small procedural desert-sky environment map (gradient ground→sky with
+// a warm sun lobe) so reflective surfaces — building glass, vehicle glazing,
+// metal — pick up a believable sky/sun reflection instead of mirroring black.
+// Without this, high-metalness window panes read as flat dark patches; with it
+// they behave like real glass that mirrors the sky and catches the sun.
+function buildSkyEnvMap(renderer: THREE.WebGLRenderer): THREE.Texture {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  // Vertical sky gradient matching the dome shader's palette.
+  const g = ctx.createLinearGradient(0, 0, 0, size);
+  g.addColorStop(0.0, "#3f73c4"); // zenith
+  g.addColorStop(0.45, "#9cc0e6"); // mid sky
+  g.addColorStop(0.55, "#efd9a8"); // horizon haze
+  g.addColorStop(0.62, "#d8b079"); // sand bounce
+  g.addColorStop(1.0, "#a9824f"); // ground
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  // Warm sun lobe (matches directional light direction, roughly high & right).
+  const sx = size * 0.72;
+  const sy = size * 0.28;
+  const sun = ctx.createRadialGradient(sx, sy, 0, sx, sy, size * 0.32);
+  sun.addColorStop(0, "rgba(255,248,224,0.95)");
+  sun.addColorStop(0.4, "rgba(255,230,180,0.4)");
+  sun.addColorStop(1, "rgba(255,230,180,0)");
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, size, size);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const envRT = pmrem.fromEquirectangular(tex);
+  tex.dispose();
+  pmrem.dispose();
+  return envRT.texture;
+}
+
 function Scene({ engine }: { engine: GameEngine }) {
-  const { camera } = useThree();
+  const { camera, scene, gl } = useThree();
   const lastTime = useRef(performance.now() / 1000);
+
+  // Install the procedural sky environment once so all standard materials get
+  // realistic image-based reflections (most visible on building windows).
+  useEffect(() => {
+    const env = buildSkyEnvMap(gl);
+    const prev = scene.environment;
+    scene.environment = env;
+    return () => {
+      scene.environment = prev;
+      env.dispose();
+    };
+  }, [scene, gl]);
 
   useFrame(() => {
     const now = performance.now() / 1000;
@@ -707,15 +759,22 @@ function InstancedBoxes({
     if (!textured) {
       return new THREE.MeshStandardMaterial({ color, roughness: 0.85, side: THREE.DoubleSide, transparent: false, depthWrite: true, depthTest: true });
     }
-    // Use white base color so the texture is shown at full brightness
+    // Tint the shared concrete/plaster PBR set by the building's own palette
+    // colour so each structure reads as its own rendered/painted plaster shade
+    // instead of every wall looking like the same grey concrete slab. The
+    // texture still supplies the surface relief, grain and roughness variation;
+    // the colour just biases the albedo. A gentle lift keeps the tint from
+    // crushing the texture detail into a flat fill.
+    const tint = new THREE.Color(color).lerp(new THREE.Color("#ffffff"), 0.18);
     return new THREE.MeshStandardMaterial({
       map: wallPBR.map,
       normalMap: wallPBR.normalMap,
       roughnessMap: wallPBR.roughnessMap,
-      normalScale: new THREE.Vector2(1.05, 1.05),
-      color: "#ffffff",
+      normalScale: new THREE.Vector2(1.15, 1.15),
+      color: tint,
       roughness: 1.0,
       metalness: 0.0,
+      envMapIntensity: 0.35,
       side: THREE.DoubleSide,
       transparent: false,
       depthWrite: true,
@@ -1178,26 +1237,34 @@ function Windows() {
   const litMat = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: "#ffce6a",
-        emissive: "#ffae40",
-        emissiveIntensity: 0.6,
-        roughness: 0.4,
+        color: "#ffd27a",
+        emissive: "#ffb24a",
+        emissiveIntensity: 0.75,
+        roughness: 0.18,
+        metalness: 0.55,
+        envMapIntensity: 0.8,
       }),
     [],
   );
+  // Dark glass: low roughness + high metalness so it picks up the sky/sun as a
+  // proper reflective pane (real windows mirror their surroundings) rather than
+  // reading as a flat dark patch. A faint cool tint keeps it glassy.
   const darkMat = useMemo(
     () =>
       new THREE.MeshStandardMaterial({
-        color: "#1a2230",
+        color: "#2a3848",
         emissive: "#0a1018",
-        emissiveIntensity: 0.2,
-        roughness: 0.3,
-        metalness: 0.4,
+        emissiveIntensity: 0.15,
+        roughness: 0.08,
+        metalness: 0.85,
+        envMapIntensity: 1.4,
       }),
     [],
   );
+  // Painted/anodised window frames — a touch metallic so the mullions catch a
+  // highlight along their edges.
   const frameMat = useMemo(
-    () => new THREE.MeshStandardMaterial({ color: "#3a2818", roughness: 0.8 }),
+    () => new THREE.MeshStandardMaterial({ color: "#2b2620", roughness: 0.6, metalness: 0.3, envMapIntensity: 0.6 }),
     [],
   );
 
