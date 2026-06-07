@@ -263,6 +263,9 @@ function Scene({ engine }: { engine: GameEngine }) {
       <BulletTrails />
       <MuzzleFlashes />
       <VehiclesScene />
+      <AircraftScene />
+      <AircraftBombsScene />
+      <AircraftGunTrailsScene />
       <ViewModel />
     </>
   );
@@ -2143,6 +2146,282 @@ function VehiclesScene() {
       mesh.position.copy(v.pos);
       mesh.rotation.y = v.yaw;
       mesh.visible = !v.destroyed;
+    }
+  });
+  return <group ref={ref} />;
+}
+
+// === AIRCRAFT ===
+// Aircraft are assembled once per instance from MeshStandardMaterial primitives
+// (mirroring the vehicle builders above) and reused by Three.js. Two distinct
+// silhouettes: a sleek interceptor (`fighter`) and a heavier ground-attack
+// plane (`attacker`). Each builder also tucks an "engine flame" cone behind the
+// nozzle(s); those cones carry userData.isFlame so AircraftScene can flicker
+// them every frame.
+
+// A small additive-ish exhaust flame that points backwards (+Z in model space,
+// which is the tail end). Animated each frame in AircraftScene.
+function makeEngineFlame(): THREE.Mesh {
+  const geo = new THREE.ConeGeometry(0.15, 0.6, 8);
+  const mat = new THREE.MeshBasicMaterial({
+    color: '#ff6a00',
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+  });
+  const m = new THREE.Mesh(geo, mat);
+  // Cone points along +Y by default; rotate so the tip faces backwards (+Z)
+  // i.e. trailing behind the aircraft's tail.
+  m.rotation.x = -Math.PI / 2;
+  m.userData.isFlame = true;
+  return m;
+}
+
+// Sleek interceptor silhouette. Model nose faces -Z, tail +Z.
+function buildFighterMesh(g: THREE.Group) {
+  const body = new THREE.MeshStandardMaterial({ color: '#4a5a6a', roughness: 0.6, metalness: 0.3 });
+  const wing = new THREE.MeshStandardMaterial({ color: '#3a4a5a', roughness: 0.6, metalness: 0.3 });
+  const dark = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.8, metalness: 0.4 });
+  const missileMat = new THREE.MeshStandardMaterial({ color: '#888888', roughness: 0.5, metalness: 0.5 });
+
+  // Fuselage.
+  const fuselage = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 6.0), body);
+  fuselage.castShadow = true;
+  g.add(fuselage);
+
+  // Main wing.
+  const mainWing = new THREE.Mesh(new THREE.BoxGeometry(10.0, 0.15, 2.2), wing);
+  mainWing.position.set(0, 0, -0.3);
+  mainWing.castShadow = true;
+  g.add(mainWing);
+  // Tapered wing tips (thin trailing extensions) to break up the slab.
+  for (const s of [-1, 1]) {
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 1.2), wing);
+    tip.position.set(s * 5.0, 0, -0.1);
+    g.add(tip);
+  }
+
+  // Vertical tail.
+  const vTail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.8, 2.0), wing);
+  vTail.position.set(0, 0.8, 2.2);
+  vTail.castShadow = true;
+  g.add(vTail);
+
+  // Horizontal tail.
+  const hTail = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.12, 1.0), wing);
+  hTail.position.set(0, 0.2, 2.3);
+  hTail.castShadow = true;
+  g.add(hTail);
+
+  // Cockpit canopy.
+  const cockpit = new THREE.Mesh(
+    new THREE.BoxGeometry(0.65, 0.5, 1.2),
+    new THREE.MeshStandardMaterial({ color: '#1b3040', transparent: true, opacity: 0.85, roughness: 0.2, metalness: 0.6 }),
+  );
+  cockpit.position.set(0, 0.4, -0.8);
+  g.add(cockpit);
+
+  // Engine nozzle (tail).
+  const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 0.6, 12), dark);
+  nozzle.rotation.x = Math.PI / 2;
+  nozzle.position.set(0, 0, 3.2);
+  g.add(nozzle);
+
+  // Engine flame trailing behind the nozzle.
+  const flame = makeEngineFlame();
+  flame.position.set(0, 0, 3.7);
+  g.add(flame);
+
+  // Two underwing missiles.
+  for (const x of [-2.5, 2.5]) {
+    const missile = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8), missileMat);
+    missile.rotation.x = Math.PI / 2;
+    missile.position.set(x, -0.2, -0.3);
+    g.add(missile);
+  }
+}
+
+// Heavier ground-attack silhouette. Model nose faces -Z, tail +Z.
+function buildAttackerMesh(g: THREE.Group) {
+  const body = new THREE.MeshStandardMaterial({ color: '#5a4a3a', roughness: 0.7, metalness: 0.2 });
+  const wing = new THREE.MeshStandardMaterial({ color: '#4a3a2a', roughness: 0.7, metalness: 0.2 });
+  const dark = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.8, metalness: 0.4 });
+  const rackMat = new THREE.MeshStandardMaterial({ color: '#333333', roughness: 0.8, metalness: 0.3 });
+
+  // Fuselage.
+  const fuselage = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.8, 5.2), body);
+  fuselage.castShadow = true;
+  g.add(fuselage);
+
+  // Main wing.
+  const mainWing = new THREE.Mesh(new THREE.BoxGeometry(11.0, 0.18, 3.0), wing);
+  mainWing.position.set(0, 0, 0);
+  mainWing.castShadow = true;
+  g.add(mainWing);
+
+  // Vertical tail.
+  const vTail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2.0, 2.2), wing);
+  vTail.position.set(0, 0.9, 2.0);
+  vTail.castShadow = true;
+  g.add(vTail);
+
+  // Horizontal tail.
+  const hTail = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.14, 1.2), wing);
+  hTail.position.set(0, 0.1, 2.1);
+  hTail.castShadow = true;
+  g.add(hTail);
+
+  // Cockpit canopy.
+  const cockpit = new THREE.Mesh(
+    new THREE.BoxGeometry(0.85, 0.6, 1.4),
+    new THREE.MeshStandardMaterial({ color: '#1b2830', transparent: true, opacity: 0.85, roughness: 0.2, metalness: 0.6 }),
+  );
+  cockpit.position.set(0, 0.5, -0.6);
+  g.add(cockpit);
+
+  // Twin engines (wing-mounted) + flames.
+  for (const x of [-1.2, 1.2]) {
+    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.8, 12), dark);
+    eng.rotation.x = Math.PI / 2;
+    eng.position.set(x, 0, 2.2);
+    g.add(eng);
+    const flame = makeEngineFlame();
+    flame.position.set(x, 0, 2.8);
+    g.add(flame);
+  }
+
+  // Four belly bomb-rack stubs, distributed along z = -1 .. 1.
+  for (let i = 0; i < 4; i++) {
+    const z = -1 + (i * 2) / 3; // -1, -0.333, 0.333, 1
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.8), rackMat);
+    rack.position.set(0, -0.55, z);
+    g.add(rack);
+  }
+}
+
+// Live aircraft renderer. Mirrors VehiclesScene's per-id mesh pooling, then
+// applies full 3-axis flight orientation and flickers the engine flames.
+function AircraftScene() {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const g = ref.current;
+    if (!g) return;
+    const planes = store.state.aircraft;
+    const ids = new Set(planes.map((v) => v.id));
+    // Recycle meshes for aircraft that no longer exist.
+    for (let i = g.children.length - 1; i >= 0; i--) {
+      const c = g.children[i] as any;
+      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
+    }
+    const time = performance.now() / 1000;
+    for (const v of planes) {
+      let mesh = g.children.find((c: any) => c.userData.id === v.id) as THREE.Group | undefined;
+      if (!mesh) {
+        mesh = new THREE.Group();
+        mesh.userData.id = v.id;
+        if (v.kind === 'attacker') {
+          buildAttackerMesh(mesh);
+        } else {
+          buildFighterMesh(mesh);
+        }
+        g.add(mesh);
+      }
+      // Position + full flight orientation. Model nose faces -Z, so add PI to
+      // yaw to align the silhouette's forward direction with the sim heading.
+      mesh.position.copy(v.pos);
+      mesh.rotation.order = 'YXZ';
+      mesh.rotation.y = v.yaw + Math.PI;
+      mesh.rotation.x = -v.pitch;
+      mesh.rotation.z = -v.roll;
+      // Grounded-but-alive planes stay visible (parked on the runway); only
+      // truly dead aircraft are hidden.
+      mesh.visible = v.alive;
+
+      // Flicker engine flames. Only run the throttle-driven flame when the
+      // aircraft is actually alive & under power.
+      const flicker = Math.sin(time * 60) * 0.2 + 0.9;
+      const lit = v.alive && v.throttle > 0.05;
+      for (const c of mesh.children) {
+        if ((c as any).userData.isFlame) {
+          c.visible = lit;
+          const grow = 0.6 + v.throttle * 0.8;
+          c.scale.set(flicker, flicker * grow, flicker);
+        }
+      }
+    }
+  });
+  return <group ref={ref} />;
+}
+
+// Falling aircraft bombs: a small bomb body + tail fin. Orientation is derived
+// from the velocity vector so the bomb noses over as it accelerates downward.
+// The actual blast is handled by the shared Explosion pool; here we only draw
+// the in-flight ordnance.
+function AircraftBombsScene() {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const g = ref.current;
+    if (!g) return;
+    const bombs = store.state.aircraftBombs;
+    while (g.children.length > bombs.length) removeAndDispose(g, g.children[g.children.length - 1]);
+    for (let i = 0; i < bombs.length; i++) {
+      const b = bombs[i];
+      let mesh = g.children[i] as THREE.Group | undefined;
+      if (!mesh) {
+        mesh = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: '#444444', roughness: 0.6, metalness: 0.4 });
+        const finMat = new THREE.MeshStandardMaterial({ color: '#333333', roughness: 0.8, metalness: 0.2 });
+        const bodyMesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), bodyMat);
+        mesh.add(bodyMesh);
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.4), finMat);
+        fin.position.set(0, 0, 0.35);
+        mesh.add(fin);
+        const fin2 = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.6, 0.4), finMat);
+        fin2.position.set(0, 0, 0.35);
+        mesh.add(fin2);
+        g.add(mesh);
+      }
+      mesh.position.copy(b.pos);
+      // Tilt the bomb so its tail (+Z) trails along the velocity vector. The
+      // dive angle comes from atan2(horizontal, -vertical).
+      const horiz = Math.hypot(b.vel.x, b.vel.z);
+      const pitch = Math.atan2(horiz, -b.vel.y); // 0 = straight down
+      mesh.rotation.order = 'YXZ';
+      mesh.rotation.y = Math.atan2(b.vel.x, b.vel.z);
+      mesh.rotation.x = pitch;
+      mesh.visible = !b.exploded;
+    }
+  });
+  return <group ref={ref} />;
+}
+
+// Yellow tracer trails for aircraft machine-gun fire. Same line-pooling
+// approach as BulletTrails, distinct colour/opacity for visibility.
+function AircraftGunTrailsScene() {
+  const ref = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const g = ref.current;
+    if (!g) return;
+    const trails = store.state.aircraftGunTrails;
+    while (g.children.length > trails.length) removeAndDispose(g, g.children[g.children.length - 1]);
+    for (let i = 0; i < trails.length; i++) {
+      const t = trails[i];
+      let line = g.children[i] as THREE.Line | undefined;
+      if (!line) {
+        const geo = new THREE.BufferGeometry();
+        const positions = new Float32Array(6);
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const mat = new THREE.LineBasicMaterial({ color: '#ffcc44', transparent: true, opacity: 0.8, linewidth: 1, depthWrite: false });
+        line = new THREE.Line(geo, mat);
+        line.renderOrder = 90;
+        g.add(line);
+      }
+      const posAttr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      posAttr.setXYZ(0, t.from.x, t.from.y, t.from.z);
+      posAttr.setXYZ(1, t.to.x, t.to.y, t.to.z);
+      posAttr.needsUpdate = true;
+      const mat = line.material as THREE.LineBasicMaterial;
+      mat.opacity = Math.min(0.85, t.ttl * 10);
     }
   });
   return <group ref={ref} />;
