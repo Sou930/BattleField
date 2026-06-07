@@ -109,7 +109,16 @@ function mulberry32(seed: number) {
 //   * East half  -> Aleppo old city (dense war-torn blocks + hilltop Citadel),
 //                   now expanded to fill the space freed by the fusion.
 // The map is enlarged to comfortably hold both districts side by side.
-export const WORLD_SIZE = 1480; // enlarged to host the airbase + city fusion
+//
+// MAP_SCALE shrinks the whole battlefield (and every structure on it) by a
+// uniform factor so all districts, roads and props re-place proportionally.
+// At 0.8 the map (and the airbase / citadel footprints, which use absolute
+// extents below) are 80% of their original size; everything that derives from
+// WORLD_SIZE follows automatically, and the absolute footprints are multiplied
+// by MAP_SCALE so the structures stay correctly proportioned to the smaller
+// world rather than overflowing it.
+export const MAP_SCALE = 0.8;
+export const WORLD_SIZE = Math.round(1480 * MAP_SCALE); // 0.8x of the original 1480
 
 // X coordinate that divides the airbase (west, x<0) from the ruined city
 // (east, x>0). A blast-wall corridor sits along this seam.
@@ -128,8 +137,8 @@ const CITY_FLAT_RADIUS = WORLD_SIZE * 0.3 + 22;
 // --- Aleppo Citadel (landmark hill-fortress on the city's NE) ------------
 export const CITADEL_X = WORLD_SIZE * 0.38;
 export const CITADEL_Z = -WORLD_SIZE * 0.28;
-const CITADEL_RADIUS = 120;
-const CITADEL_HEIGHT = 34;
+const CITADEL_RADIUS = 120 * MAP_SCALE;
+const CITADEL_HEIGHT = 34 * MAP_SCALE;
 
 // --- Fused Nellis airbase flat zone (west side) --------------------------
 // The runway / taxiway / apron and the whole fortified compound now share a
@@ -1120,9 +1129,9 @@ export function generateWorld(): World {
 export const BASE_POS = new THREE.Vector3(AIRFIELD_CENTER_X, 0, AIRFIELD_CENTER_Z);
 // Half-extents of the (now rectangular) compound: wide enough to hold the
 // runway + taxiway + apron, tall enough to span most of the runway length.
-export const BASE_HALF = 150; // legacy square half-extent (kept for terrain skirt + spawns)
-export const BASE_HALF_X = 200; // east-west half extent (runway + taxiway + apron)
-export const BASE_HALF_Z = 320; // north-south half extent (along the runway)
+export const BASE_HALF = 150 * MAP_SCALE; // legacy square half-extent (kept for terrain skirt + spawns)
+export const BASE_HALF_X = 200 * MAP_SCALE; // east-west half extent (runway + taxiway + apron)
+export const BASE_HALF_Z = 320 * MAP_SCALE; // north-south half extent (along the runway)
 
 // Build the FUSED Nellis airbase: one walled compound that contains the full
 // operational airfield (long runway, parallel taxiway, connector taxiways,
