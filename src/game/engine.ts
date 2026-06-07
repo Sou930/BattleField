@@ -40,6 +40,41 @@ const AIRCRAFT_RESPAWN_DELAY = 10;    // 着陸後の再出撃までの秒数
 const AIRCRAFT_GUN_RELOAD    = 3;     // 弾切れ後の補充までの秒数
 const AIRCRAFT_ENTER_RANGE   = 8.0;   // プレイヤーが搭乗できる水平距離
 
+// === REALISTIC GROUND-VEHICLE DYNAMICS =====================================
+// Per-kind physical handling characteristics. These drive a proper bicycle-ish
+// vehicle model: engine force scaling, tyre grip (lateral), mass/inertia, brake
+// strength, drag and steering authority. Light vehicles are nimble and slidey;
+// heavy ones are slow to turn, grip hard and shrug off bumps.
+interface VehicleDynamics {
+  mass: number;          // relative mass (affects accel, inertia, bounce)
+  enginePower: number;   // forward acceleration authority (m/s^2 scale)
+  brakePower: number;    // braking / reverse authority
+  grip: number;          // lateral tyre grip 0..1 (higher = less drift)
+  steerRate: number;     // max steering angle authority (rad/s scale)
+  steerEase: number;     // how quickly yawRate tracks the steering target
+  drag: number;          // aerodynamic drag coefficient
+  rollResist: number;    // rolling resistance / engine braking
+  wheelbase: number;     // affects turn radius vs. speed
+  rollStiff: number;     // body-lean stiffness (visual)
+  trackWidth: number;    // resistance to rollover lean (visual)
+}
+const VEHICLE_DYN: Record<Vehicle["kind"], VehicleDynamics> = {
+  jeep:   { mass: 1.0, enginePower: 26, brakePower: 30, grip: 0.78, steerRate: 1.9, steerEase: 7.0, drag: 0.020, rollResist: 0.9, wheelbase: 2.6, rollStiff: 0.040, trackWidth: 1.6 },
+  humvee: { mass: 1.4, enginePower: 24, brakePower: 30, grip: 0.82, steerRate: 1.6, steerEase: 6.0, drag: 0.024, rollResist: 1.0, wheelbase: 3.3, rollStiff: 0.034, trackWidth: 2.0 },
+  truck:  { mass: 2.4, enginePower: 18, brakePower: 22, grip: 0.70, steerRate: 1.2, steerEase: 4.0, drag: 0.034, rollResist: 1.3, wheelbase: 4.2, rollStiff: 0.030, trackWidth: 2.1 },
+  apc:    { mass: 3.2, enginePower: 17, brakePower: 24, grip: 0.88, steerRate: 1.3, steerEase: 4.5, drag: 0.030, rollResist: 1.5, wheelbase: 3.8, rollStiff: 0.022, trackWidth: 2.4 },
+  tank:   { mass: 5.0, enginePower: 15, brakePower: 26, grip: 0.95, steerRate: 1.1, steerEase: 3.5, drag: 0.028, rollResist: 1.8, wheelbase: 4.0, rollStiff: 0.015, trackWidth: 2.8 },
+};
+
+// === REALISTIC FLIGHT DYNAMICS =============================================
+const AIRCRAFT_THRUST_FIGHTER = 95;   // 推力加速 (m/s^2) at full throttle
+const AIRCRAFT_THRUST_ATTACKER = 70;
+const AIRCRAFT_LIFT_COEF      = 0.0016; // 揚力係数 (×v^2)
+const AIRCRAFT_DRAG_COEF      = 0.00022;// 寄生抗力係数 (×v^2)
+const AIRCRAFT_INDUCED_DRAG   = 0.9;    // 誘導抗力 (旋回G依存)
+const AIRCRAFT_STALL_AOA      = 0.32;   // 失速迎角 (rad ≈ 18°)
+const AIRCRAFT_CTRL_EASE      = 4.5;    // 操縦入力の追従速度 (慣性感)
+
 // Reusable temp vectors to reduce allocations in hot paths
 const _tmpV1 = new THREE.Vector3();
 const _tmpV2 = new THREE.Vector3();
@@ -160,6 +195,14 @@ export class GameEngine {
         speed: st.speed,
         team: null,
         destroyed: false,
+        yawRate: 0,
+        bodyRoll: 0,
+        bodyPitch: 0,
+        suspension: 0,
+        suspensionVel: 0,
+        engineRpm: 0,
+        slip: 0,
+        wheelSpin: 0,
       });
     };
 
@@ -647,86 +690,133 @@ export class GameEngine {
     }
     const p = this.state.player;
 
-    // ── マウスで機首操作 ──────────────────────────────
+    // ── 操縦入力 (慣性付きで平滑化) ─────────────────────
+    // マウス: ピッチ & ロール指令。WASD: スロットル & ロール補助。
     const md = this.input.consumeMouseDelta();
-    const sens = 0.0018;
-    ac.yaw   -= md.dx * sens;
-    ac.pitch -= md.dy * sens;
-    ac.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, ac.pitch));
+    const sens = 0.0016;
+    const pitchCmd = THREE.MathUtils.clamp(ac.pitchInput - md.dy * sens * 90, -1, 1);
+    let rollCmd = THREE.MathUtils.clamp(ac.rollInput + md.dx * sens * 90, -1, 1);
 
-    // ── WASD でスロットル・バンク ───────────────────────
     if (this.input.keys.has("KeyW"))
-      ac.throttle = Math.min(1, ac.throttle + 2 * dt);
+      ac.throttle = Math.min(1, ac.throttle + 0.8 * dt);
     if (this.input.keys.has("KeyS"))
-      ac.throttle = Math.max(0, ac.throttle - 2 * dt);
-    if (this.input.keys.has("KeyA"))
-      ac.roll = Math.max(-Math.PI * 0.6, ac.roll + 1.8 * dt);
-    if (this.input.keys.has("KeyD"))
-      ac.roll = Math.min(Math.PI * 0.6,  ac.roll - 1.8 * dt);
+      ac.throttle = Math.max(0, ac.throttle - 0.8 * dt);
+    if (this.input.keys.has("KeyA")) rollCmd = -1;
+    if (this.input.keys.has("KeyD")) rollCmd = 1;
+    // 操縦桿を慣性で追従 (操縦の重さ)。
+    ac.pitchInput += (pitchCmd - ac.pitchInput) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
+    ac.rollInput  += (rollCmd  - ac.rollInput ) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
+    if (!this.input.keys.has("KeyA") && !this.input.keys.has("KeyD") && Math.abs(md.dx) < 0.5)
+      ac.rollInput *= Math.pow(0.4, dt);
 
-    // バンク飛行: ロール量に応じてヨーを自動変化
-    ac.yaw -= ac.roll * 0.9 * dt;
-    // ロールを徐々に中立へ戻す
-    ac.roll *= Math.pow(0.15, dt);
+    // ── ロール入力 → バンク角 ────────────────────────
+    const maxBank = Math.PI * 0.7;
+    ac.roll = THREE.MathUtils.clamp(ac.roll + ac.rollInput * 2.2 * dt, -maxBank, maxBank);
+    if (Math.abs(ac.rollInput) < 0.1) ac.roll *= Math.pow(0.5, dt); // 静安定で水平へ
 
-    // ── 速度更新 ────────────────────────────────────
     const maxSpd = ac.kind === "fighter" ? AIRCRAFT_MAX_SPEED : AIRCRAFT_ATK_MAX_SPEED;
-    const cy = Math.cos(ac.pitch);
-    const sy = Math.sin(ac.pitch);
-    const fwd = new THREE.Vector3(
-      -Math.sin(ac.yaw) * cy,
-      sy,
-      -Math.cos(ac.yaw) * cy,
-    );
-    const curSpd  = ac.vel.length();
-    const tgtSpd  = ac.throttle * maxSpd;
-    const newSpd  = curSpd + (tgtSpd - curSpd) * Math.min(1, 3 * dt);
+    const thrustMax = ac.kind === "fighter" ? AIRCRAFT_THRUST_FIGHTER : AIRCRAFT_THRUST_ATTACKER;
 
-    // 滑走路上を滑走中 (onGround) は、揚力発生速度に達するまで地面に沿って
-    // 水平に加速する。離陸前に重力で機体が地面にめり込むと着陸判定が毎フレーム
-    // スロットルを 0 に戻してしまい、いつまでも加速できなかった。離陸滑走中は
-    // 重力・着陸判定を止め、機体を滑走路高さに固定して純粋に加速させる。
     if (ac.onGround) {
-      // 機首は水平 (ピッチ無視) のまま前進方向だけで加速。
+      // ── 地上滑走: 機首水平、スラストで加速し揚力速度で離陸 ──
       const groundFwd = new THREE.Vector3(-Math.sin(ac.yaw), 0, -Math.cos(ac.yaw));
-      ac.vel.copy(groundFwd).multiplyScalar(newSpd);
+      let gSpd = ac.vel.length();
+      gSpd += ac.throttle * thrustMax * dt;
+      gSpd *= 1 - AIRCRAFT_DRAG_COEF * gSpd * dt; // drag
+      gSpd = Math.min(gSpd, maxSpd);
+      ac.pitch = 0;
+      ac.roll = 0;
+      ac.vel.copy(groundFwd).multiplyScalar(gSpd);
       ac.pos.addScaledVector(ac.vel, dt);
-      ac.pos.y = 0.8; // 滑走路面に固定
-      // 揚力発生速度に達したら離陸。
-      if (newSpd > AIRCRAFT_LIFT_SPEED) {
+      ac.pos.y = 0.8;
+      // 離陸 (ローテーション): 操縦桿を引けば揚力速度で、引かなくても十分速度が
+      // 乗れば自然に浮く。これにより W だけでも離陸できる。
+      const rotateSpeed = ac.pitchInput > 0.15 ? AIRCRAFT_LIFT_SPEED : AIRCRAFT_LIFT_SPEED * 1.15;
+      if (gSpd > rotateSpeed) {
         ac.onGround = false;
+        ac.pitch = Math.max(0.12, ac.pitch);
+        ac.vel.y = 4;
       }
-      // 世界端クランプ
       const lim0 = WORLD_SIZE / 2 - 20;
       ac.pos.x = Math.max(-lim0, Math.min(lim0, ac.pos.x));
       ac.pos.z = Math.max(-lim0, Math.min(lim0, ac.pos.z));
+      ac.stalling = false;
+      ac.gForce = 1;
     } else {
-      ac.vel.copy(fwd).multiplyScalar(newSpd);
-      // 失速補正
-      if (newSpd < AIRCRAFT_STALL_SPEED) ac.vel.y -= AIRCRAFT_GRAVITY * dt * 0.5;
+      // ════════════════════════════════════════════════════════════════
+      //  力ベースの飛行モデル: 推力・抗力・揚力・重力を速度へ積分する
+      // ════════════════════════════════════════════════════════════════
+      const speed = ac.vel.length();
+      const cy = Math.cos(ac.pitch);
+      const fwd = new THREE.Vector3(
+        -Math.sin(ac.yaw) * cy,
+        Math.sin(ac.pitch),
+        -Math.cos(ac.yaw) * cy,
+      );
 
-      // ── 位置更新 ────────────────────────────────────
+      // 迎角(AoA): 操縦桿引きで増える。揚力と失速を支配する。
+      const aoaCmd = ac.pitchInput * 0.35;
+      ac.aoa += (aoaCmd - ac.aoa) * Math.min(1, 6 * dt);
+
+      // ── ピッチ操作: 動圧(速度)が高いほど舵が効く ──
+      const q = Math.min(1.3, speed / AIRCRAFT_LIFT_SPEED);
+      ac.pitch += ac.pitchInput * 1.7 * q * dt;
+      ac.pitch = THREE.MathUtils.clamp(ac.pitch, -Math.PI * 0.49, Math.PI * 0.49);
+
+      // ── バンク → 協調旋回: yawRate = g·tan(bank)/v ──
+      if (speed > 5) {
+        const turnRate = (9.8 * Math.tan(ac.roll)) / speed;
+        ac.yaw -= turnRate * dt;
+      }
+
+      // ── 失速判定 ──
+      const effAoa = Math.abs(ac.aoa) + Math.max(0, (AIRCRAFT_STALL_SPEED - speed) / AIRCRAFT_STALL_SPEED) * 0.4;
+      ac.stalling = effAoa > AIRCRAFT_STALL_AOA || speed < AIRCRAFT_STALL_SPEED * 0.6;
+
+      // ── 揚力 L = Cl·v²·(1+AoA)、バンクで鉛直成分が減る ──
+      let liftMag = AIRCRAFT_LIFT_COEF * speed * speed * (1 + ac.aoa * 2.5);
+      if (ac.stalling) liftMag *= 0.35;
+      const liftVert = liftMag * Math.cos(ac.roll);
+
+      // 旋回G (誘導抗力 & HUD表示用)。
+      ac.gForce = 1 / Math.max(0.2, Math.cos(ac.roll));
+
+      // ── 抗力: 寄生抗力 + 誘導抗力 ──
+      const parasiticDrag = AIRCRAFT_DRAG_COEF * speed * speed;
+      const inducedDrag = AIRCRAFT_INDUCED_DRAG * Math.abs(ac.aoa) * Math.max(0, ac.gForce - 1) * 4;
+      const dragMag = parasiticDrag + inducedDrag;
+
+      // ── 力を積分 ──
+      ac.vel.addScaledVector(fwd, ac.throttle * thrustMax * dt);     // 推力
+      if (speed > 0.01) ac.vel.addScaledVector(ac.vel, -dragMag * dt / speed); // 抗力
+      ac.vel.y += (liftVert - AIRCRAFT_GRAVITY) * dt;                 // 揚力 - 重力
+      if (ac.stalling) {                                              // 失速 → 機首落ち
+        ac.pitch -= dt * 0.6;
+        ac.vel.y -= AIRCRAFT_GRAVITY * 0.4 * dt;
+      }
+
+      // ── 位置更新 ──
       ac.pos.addScaledVector(ac.vel, dt);
-
-      // 高度上限
       ac.pos.y = Math.min(ac.pos.y, 800);
-      // 世界端
       const lim = WORLD_SIZE / 2 - 20;
       ac.pos.x = Math.max(-lim, Math.min(lim, ac.pos.x));
       ac.pos.z = Math.max(-lim, Math.min(lim, ac.pos.z));
 
-      // ── 地面判定 ────────────────────────────────────
+      // ── 着陸 / 墜落判定 ──
       if (ac.pos.y < 0.8) {
         ac.pos.y = 0.8;
-        if (newSpd < 35) {
-          // 着陸成功
+        const horizSpeed = Math.hypot(ac.vel.x, ac.vel.z);
+        const sinkRate = -ac.vel.y;
+        // 低速・低降下率・水平姿勢なら着陸成功、さもなくば墜落。
+        if (horizSpeed < 75 && sinkRate < 12 && Math.abs(ac.pitch) < 0.25 && Math.abs(ac.roll) < 0.3) {
           ac.onGround = true;
           ac.vel.set(0, 0, 0);
-          ac.pitch   = 0;
-          ac.roll    = 0;
-          ac.throttle = 0;
+          ac.pitch = 0;
+          ac.roll = 0;
+          ac.throttle = Math.min(ac.throttle, 0.2);
+          ac.aoa = 0;
+          ac.stalling = false;
         } else {
-          // クラッシュ
           ac.alive = false;
           ac.onGround = false;
           this.state.playerInAircraft = null;
@@ -736,6 +826,14 @@ export class GameEngine {
         }
       }
     }
+
+    // カメラ・武装用の最終的な前方ベクトル。
+    const cyF = Math.cos(ac.pitch);
+    const fwd = new THREE.Vector3(
+      -Math.sin(ac.yaw) * cyF,
+      Math.sin(ac.pitch),
+      -Math.cos(ac.yaw) * cyF,
+    );
 
     // ── 武装 ─────────────────────────────────────────
     // 機関銃: 左クリック
@@ -1307,37 +1405,109 @@ export class GameEngine {
     }
 
     const p = this.state.player;
-    // Steer vehicle with WASD or touch controls
-    let accel = 0;
-    let steer = 0;
+    // ── 入力収集: スロットル (-1..1) とステア (-1..1) ─────────────────────
+    let throttle = 0;   // +1 = full gas, -1 = full reverse/brake
+    let steerIn = 0;    // +1 = left, -1 = right
 
     // Keyboard input
-    if (this.input.keys.has("KeyW")) accel = 1;
-    if (this.input.keys.has("KeyS")) accel = -0.6;
-    if (this.input.keys.has("KeyA")) steer = 1.5;
-    if (this.input.keys.has("KeyD")) steer = -1.5;
+    if (this.input.keys.has("KeyW")) throttle = 1;
+    if (this.input.keys.has("KeyS")) throttle = -1;
+    if (this.input.keys.has("KeyA")) steerIn = 1;
+    if (this.input.keys.has("KeyD")) steerIn = -1;
+    // Handbrake (Space): kills lateral grip for sharp slides.
+    const handbrake = this.input.keys.has("Space");
 
     // Touch input: joystick for steering, gas/brake buttons for throttle
     const tm = this.input.touchMove;
     if (tm) {
-      // Touch: left stick X for steering
-      if (Math.abs(tm.x) > 0.1) steer = -tm.x * 2.0;
-      // Touch: gas/brake buttons override stick Y
+      if (Math.abs(tm.x) > 0.1) steerIn = -tm.x;
       if (this.input.vehicleGas) {
-        accel = 1;
+        throttle = 1;
       } else if (this.input.vehicleBrake) {
-        accel = -0.6;
+        throttle = -1;
       } else if (Math.abs(tm.y) > 0.1) {
-        // Fallback: stick Y for gas/brake if buttons not used
-        accel = tm.y > 0 ? 1 : -0.6;
+        throttle = tm.y > 0 ? 1 : -1;
+      }
+    }
+    steerIn = THREE.MathUtils.clamp(steerIn, -1, 1);
+
+    const dyn = VEHICLE_DYN[v.kind];
+
+    // ── 車体座標系: 前方ベクトル & 右ベクトル ─────────────────────────────
+    const fwd = new THREE.Vector3(-Math.sin(v.yaw), 0, -Math.cos(v.yaw));
+    const right = new THREE.Vector3(-Math.cos(v.yaw), 0, Math.sin(v.yaw));
+
+    // 速度を前後 / 横方向成分に分解 (タイヤモデルの肝)。
+    let vLong = v.vel.x * fwd.x + v.vel.z * fwd.z;   // 前進(+)/後退(-)
+    let vLat  = v.vel.x * right.x + v.vel.z * right.z; // 横滑り
+    const speed = Math.hypot(vLong, vLat);
+    const absLong = Math.abs(vLong);
+
+    // ── エンジン: 速度が上がるほど加速が鈍る (トルクカーブ風) ─────────────
+    const topSpeed = v.speed;
+    const movingFwd = vLong >= -0.5;
+    if (throttle > 0) {
+      // 駆動力。最高速近くで頭打ち。
+      const powerFade = Math.max(0, 1 - absLong / (topSpeed * 1.05));
+      vLong += dyn.enginePower * powerFade * throttle * dt;
+    } else if (throttle < 0) {
+      if (vLong > 0.5) {
+        // 前進中の S = ブレーキ。
+        vLong -= dyn.brakePower * dt;
+        if (vLong < 0) vLong = 0;
+      } else {
+        // 停止/後退中の S = バックギア (前進より遅い)。
+        vLong -= dyn.enginePower * 0.55 * dt;
+        vLong = Math.max(vLong, -topSpeed * 0.4);
       }
     }
 
-    const spd = Math.hypot(v.vel.x, v.vel.z);
-    v.yaw += steer * dt * Math.min(1, spd / 3);
-    const fwd = new THREE.Vector3(-Math.sin(v.yaw), 0, -Math.cos(v.yaw));
-    v.vel.addScaledVector(fwd, accel * v.speed * dt);
-    v.vel.multiplyScalar(1 - 2.5 * dt); // friction
+    // ── 走行抵抗: 転がり抵抗 + 空気抵抗 (速度二乗) ────────────────────────
+    const rollDecel = dyn.rollResist * Math.sign(vLong) * dt;
+    if (Math.abs(rollDecel) > Math.abs(vLong)) vLong = 0; else vLong -= rollDecel;
+    vLong *= 1 - dyn.drag * absLong * dt;
+
+    // ── ステアリング: 速度感応 + 慣性のあるヨーレート ───────────────────
+    // 停止時はほぼ曲がれず、中速で最大、高速でやや緩くなる (実車の感覚)。
+    const steerAuthority = Math.min(1, absLong / 3) * (1 - Math.min(0.45, absLong / (topSpeed * 2)));
+    // バック時はステア反転。
+    const steerSign = movingFwd ? 1 : -1;
+    const targetYawRate = steerIn * dyn.steerRate * steerAuthority * steerSign;
+    v.yawRate += (targetYawRate - v.yawRate) * Math.min(1, dyn.steerEase * dt);
+    v.yaw += v.yawRate * dt;
+
+    // ── タイヤの横グリップ: 横滑り速度を摩擦で削る (ドリフト挙動) ─────────
+    // ハンドブレーキ or 過大な横力でグリップを失うとスライドが続く。
+    let gripFactor = dyn.grip;
+    if (handbrake) gripFactor *= 0.18;
+    // 旋回中は遠心力で横速度が増える: ヨーレート×前進速度ぶんを横方向へ。
+    vLat += v.yawRate * vLong * dt;
+    // 横グリップで横滑りを減衰 (フレームレート非依存)。
+    const latGrip = 1 - Math.min(0.99, gripFactor * 14 * dt);
+    vLat *= latGrip;
+
+    // スリップ量 (0..1): 横速度が大きいほどドリフト中。
+    v.slip = THREE.MathUtils.clamp(Math.abs(vLat) / Math.max(4, speed), 0, 1);
+
+    // ── 速度ベクトルを車体座標から再合成 ─────────────────────────────────
+    v.vel.set(
+      fwd.x * vLong + right.x * vLat,
+      0,
+      fwd.z * vLong + right.z * vLat,
+    );
+
+    // ── 斜面の影響: 坂を登ると減速、下ると加速 ───────────────────────────
+    const aheadH = terrainHeightAt(this.world, v.pos.x + fwd.x * 2, v.pos.z + fwd.z * 2);
+    const hereH = terrainHeightAt(this.world, v.pos.x, v.pos.z);
+    const slope = (aheadH - hereH) / 2; // rise per metre forward
+    vLong -= slope * 14 * dt; // gravity component along slope
+    // re-apply slope-corrected longitudinal speed
+    v.vel.set(
+      fwd.x * vLong + right.x * vLat,
+      0,
+      fwd.z * vLong + right.z * vLat,
+    );
+
     v.pos.addScaledVector(v.vel, dt);
 
     // Vehicle collision with world boxes
@@ -1351,18 +1521,49 @@ export class GameEngine {
       const d2 = dx * dx + dz * dz;
       if (d2 < vRadius * vRadius) {
         const d = Math.sqrt(d2) || 0.001;
-        v.pos.x += (dx / d) * (vRadius - d);
-        v.pos.z += (dz / d) * (vRadius - d);
-        // Bounce velocity
-        v.vel.x *= -0.3;
-        v.vel.z *= -0.3;
+        const nx = dx / d, nz = dz / d;
+        v.pos.x += nx * (vRadius - d);
+        v.pos.z += nz * (vRadius - d);
+        // Reflect velocity off the surface normal & bleed energy (heavier =
+        // less bounce, more thud). Triggers a small suspension jolt + shake.
+        const vn = v.vel.x * nx + v.vel.z * nz;
+        if (vn < 0) {
+          const restitution = 0.25;
+          v.vel.x -= (1 + restitution) * vn * nx;
+          v.vel.z -= (1 + restitution) * vn * nz;
+          const impact = Math.abs(vn);
+          v.suspensionVel -= Math.min(4, impact * 0.25);
+          if (impact > 6) this.state.shake = Math.min(0.5, impact * 0.03);
+        }
       }
     }
 
     const lim = WORLD_SIZE / 2 - 5;
     v.pos.x = Math.max(-lim, Math.min(lim, v.pos.x));
     v.pos.z = Math.max(-lim, Math.min(lim, v.pos.z));
-    v.pos.y = terrainHeightAt(this.world, v.pos.x, v.pos.z) + (v.kind === "tank" ? 0.6 : 0.5);
+
+    // ── サスペンション: 地形段差を吸収するバネ・ダンパー ─────────────────
+    const groundY = terrainHeightAt(this.world, v.pos.x, v.pos.z) + (v.kind === "tank" ? 0.6 : 0.5);
+    // Spring pulls the body to rest, damper kills oscillation.
+    const springK = 90 / dyn.mass;
+    const damp = 12;
+    v.suspensionVel += (-v.suspension * springK - v.suspensionVel * damp) * dt;
+    v.suspension += v.suspensionVel * dt;
+    v.suspension = THREE.MathUtils.clamp(v.suspension, -0.35, 0.35);
+    v.pos.y = groundY + v.suspension;
+
+    // ── 車体姿勢 (見た目): コーナーでロール、加減速でピッチ ───────────────
+    const targetRoll = THREE.MathUtils.clamp(
+      -v.yawRate * vLong * dyn.rollStiff / dyn.trackWidth, -0.35, 0.35);
+    v.bodyRoll += (targetRoll - v.bodyRoll) * Math.min(1, 6 * dt);
+    const longAccel = throttle > 0 ? throttle : (throttle < 0 && vLong > 0.5 ? -1.4 : 0);
+    const targetPitch = THREE.MathUtils.clamp(-longAccel * 0.05, -0.08, 0.08);
+    v.bodyPitch += (targetPitch - v.bodyPitch) * Math.min(1, 5 * dt);
+
+    // ── エンジン回転 & 車輪回転 (音・見た目用) ───────────────────────────
+    const targetRpm = Math.min(1, 0.12 + absLong / topSpeed + (throttle > 0 ? 0.25 : 0) + v.slip * 0.3);
+    v.engineRpm += (targetRpm - v.engineRpm) * Math.min(1, 4 * dt);
+    v.wheelSpin += (vLong / 0.5) * dt;
 
     // Player rides vehicle — seat height varies with the hull size so the
     // camera sits in the cab/turret rather than buried inside or floating above.
@@ -1392,9 +1593,25 @@ export class GameEngine {
     for (const v of this.state.vehicles) {
       if (v.destroyed) continue;
       if (v.id === this.state.playerInVehicle) continue;
-      // Decelerate unoccupied vehicles
+      // Coast unoccupied vehicles to a stop with rolling resistance, then let
+      // the suspension settle so a parked truck visibly sits on its springs.
       v.vel.multiplyScalar(1 - 3 * dt);
+      if (v.vel.lengthSq() < 0.0004) v.vel.set(0, 0, 0);
       v.pos.addScaledVector(v.vel, dt);
+      // Decay handling state back to neutral.
+      v.yawRate *= Math.pow(0.1, dt);
+      v.slip *= Math.pow(0.1, dt);
+      v.engineRpm += (0 - v.engineRpm) * Math.min(1, 3 * dt);
+      v.bodyRoll *= Math.pow(0.05, dt);
+      v.bodyPitch *= Math.pow(0.05, dt);
+      // Suspension spring/damper settling onto the terrain.
+      const dyn = VEHICLE_DYN[v.kind];
+      const groundY = terrainHeightAt(this.world, v.pos.x, v.pos.z) + (v.kind === "tank" ? 0.6 : 0.5);
+      const springK = 90 / dyn.mass;
+      v.suspensionVel += (-v.suspension * springK - v.suspensionVel * 12) * dt;
+      v.suspension += v.suspensionVel * dt;
+      v.suspension = THREE.MathUtils.clamp(v.suspension, -0.35, 0.35);
+      v.pos.y = groundY + v.suspension;
     }
   }
 
@@ -2319,6 +2536,11 @@ export class GameEngine {
         // taxiing→takeoff へ遷移しないようにし、滑走路南端で静止待機させる。
         aiTimer: 999,
         engineSmoke: false,
+        pitchInput: 0,
+        rollInput: 0,
+        aoa: 0,
+        stalling: false,
+        gForce: 1,
       };
       this.state.aircraft.push(ac);
     }
@@ -2599,6 +2821,11 @@ export class GameEngine {
     // リスポーン後も自動離陸しない: タイマーを 999 にして taxiing→takeoff へ
     // 遷移させず、滑走路南端で再び静止待機させる。
     ac.aiTimer = 999;
+    ac.pitchInput = 0;
+    ac.rollInput = 0;
+    ac.aoa = 0;
+    ac.stalling = false;
+    ac.gForce = 1;
   }
 
   // Smallest signed angle delta to rotate `from` toward `to` (radians).

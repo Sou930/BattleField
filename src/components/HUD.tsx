@@ -255,6 +255,7 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
           </div>
           <div>SPD  {Math.round(myAircraft.vel.length() * 3.6)} km/h</div>
           <div>ALT  {Math.round(myAircraft.pos.y)} m</div>
+          <div>G    {(myAircraft.gForce ?? 1).toFixed(1)} G</div>
           <div className="mt-1">
             THR
             <span className="ml-1 inline-block w-24 h-2 bg-gray-700 align-middle rounded">
@@ -264,6 +265,9 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
               />
             </span>
           </div>
+          {myAircraft.stalling && (
+            <div className="mt-1 text-red-400 font-bold animate-pulse">⚠ STALL 失速</div>
+          )}
           <div>GUN  {myAircraft.gunAmmo}/{myAircraft.gunAmmoMax}</div>
           {myAircraft.kind === "attacker" && (
             <div>BOMB {myAircraft.bombCount}/{myAircraft.bombMax}</div>
