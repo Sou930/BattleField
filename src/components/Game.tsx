@@ -226,6 +226,12 @@ function buildSkyEnvMap(renderer: THREE.WebGLRenderer): THREE.Texture {
 function Scene({ engine }: { engine: GameEngine }) {
   const { camera, scene, gl } = useThree();
   const lastTime = useRef(performance.now() / 1000);
+  // Throttle shadow-map recomputation (see gl.shadowMap.autoUpdate = false in
+  // the Canvas onCreated handler). We refresh the shadows ~12x/sec which keeps
+  // moving casters looking correct while skipping the expensive per-frame
+  // shadow pass on the other ~48 frames.
+  const shadowAccum = useRef(0);
+  const SHADOW_UPDATE_INTERVAL = 1 / 12;
 
   // Install the procedural sky environment once so all standard materials get
   // realistic image-based reflections (most visible on building windows).
@@ -243,6 +249,15 @@ function Scene({ engine }: { engine: GameEngine }) {
     const now = performance.now() / 1000;
     const dt = Math.min(0.05, now - lastTime.current);
     lastTime.current = now;
+
+    // Refresh the (otherwise manual) shadow map on a throttled cadence so the
+    // heavy shadow pass runs only a handful of times per second.
+    shadowAccum.current += dt;
+    if (shadowAccum.current >= SHADOW_UPDATE_INTERVAL) {
+      shadowAccum.current = 0;
+      gl.shadowMap.needsUpdate = true;
+    }
+
     engine.update(dt, now);
     const p = engine.state.player;
     const sh = engine.state.shake;
@@ -283,12 +298,12 @@ function Scene({ engine }: { engine: GameEngine }) {
         intensity={2.8}
         color="#fff1cf"
         castShadow
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
-        shadow-camera-left={-180}
-        shadow-camera-right={180}
-        shadow-camera-top={180}
-        shadow-camera-bottom={-180}
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-left={-140}
+        shadow-camera-right={140}
+        shadow-camera-top={140}
+        shadow-camera-bottom={-140}
         shadow-camera-near={1}
         shadow-camera-far={400}
         shadow-bias={-0.00018}
@@ -1100,7 +1115,9 @@ function Lamps() {
     <group>
       {sharedWorld.lamps.map((l, i) => (
         <group key={i} position={[l.pos.x, l.pos.y, l.pos.z]}>
-          <mesh position={[0, 1.6, 0]} castShadow geometry={poleGeo} material={poleMat} />
+          {/* Thin lamp poles barely register as shadows but still cost a full
+              pass each — skip casting to lighten the shadow render. */}
+          <mesh position={[0, 1.6, 0]} geometry={poleGeo} material={poleMat} />
           <mesh position={[0, 3.2, 0]} geometry={bulbGeo} material={bulbMat} />
         </group>
       ))}
@@ -1169,12 +1186,12 @@ function Awnings() {
             <boxGeometry args={[a.size.x, a.size.y, a.size.z]} />
             <meshStandardMaterial color={a.color} roughness={0.85} side={THREE.DoubleSide} />
           </mesh>
-          {/* support poles */}
-          <mesh position={[a.size.x / 2 - 0.05, -1.3, a.size.z / 2 - 0.05]} castShadow>
+          {/* support poles — thin, so skip shadow casting to save a pass */}
+          <mesh position={[a.size.x / 2 - 0.05, -1.3, a.size.z / 2 - 0.05]}>
             <cylinderGeometry args={[0.04, 0.04, 2.6, 6]} />
             <meshStandardMaterial color="#1a1410" />
           </mesh>
-          <mesh position={[-(a.size.x / 2 - 0.05), -1.3, a.size.z / 2 - 0.05]} castShadow>
+          <mesh position={[-(a.size.x / 2 - 0.05), -1.3, a.size.z / 2 - 0.05]}>
             <cylinderGeometry args={[0.04, 0.04, 2.6, 6]} />
             <meshStandardMaterial color="#1a1410" />
           </mesh>
@@ -2799,6 +2816,15 @@ export default function Game() {
               gl.shadowMap.enabled = true;
               // Soft, slightly higher-quality shadow filtering.
               gl.shadowMap.type = THREE.PCFSoftShadowMap;
+              // Don't recompute the shadow map on every single frame. The sun
+              // (directional light) is static, so the only thing that changes
+              // are the dynamic casters (soldiers, vehicles, ...). Re-rendering
+              // the full shadow map ~60x/sec is one of the heaviest GPU costs;
+              // refreshing it a few times per second instead is visually
+              // indistinguishable but frees a large amount of frame time. The
+              // Scene component flips `needsUpdate` on a throttled cadence.
+              gl.shadowMap.autoUpdate = false;
+              gl.shadowMap.needsUpdate = true;
             }}
           >
             <Suspense fallback={null}>
