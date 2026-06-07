@@ -660,7 +660,10 @@ function Roofs() {
   return (
     <group>
       {groups.map(([color, items]) => (
-        <InstancedBoxes key={color} items={items} color={color} castShadow receiveShadow />
+        // Texture rooftops with the layered-concrete PBR set too so the flat
+        // roofs (very visible from the elevated sniper nests / citadel / control
+        // tower) read as real concrete slabs instead of flat colour fills.
+        <InstancedBoxes key={color} items={items} color={color} castShadow receiveShadow textured />
       ))}
     </group>
   );
