@@ -57,6 +57,30 @@ export interface Container {
   color: string;
 }
 
+// An explicitly authored sniper firing position. Each post sits on the high
+// ground of a desert outpost (a raised platform / tower nest) and stores the
+// direction it overwatches plus the relative elevation advantage it enjoys
+// over the surrounding terrain. The AI / spawn logic and the tactical map can
+// read these to prefer the high ground for long-range duels.
+export interface SniperPost {
+  pos: THREE.Vector3; // world position of the firing slit / nest floor
+  yaw: number; // facing (radians) — the lane the post overwatches
+  elevation: number; // height advantage over the surrounding desert floor
+  outpostId: number; // which outpost this post belongs to
+}
+
+// A desert-rim outpost: a small fortified position seated on raised terrain at
+// the open outer edge of the map. Each carries its own sniper posts so the
+// elevation advantage is placed explicitly rather than left to chance.
+export interface Outpost {
+  id: number;
+  pos: THREE.Vector3; // ground-level center (y = terrain height)
+  groundY: number; // terrain height under the outpost center
+  radius: number; // footprint radius (for spawn / map use)
+  name: string;
+  sniperPosts: SniperPost[];
+}
+
 // Deterministic seeded random
 function mulberry32(seed: number) {
   return function () {
@@ -522,6 +546,8 @@ export interface World {
   hills: TerrainHill[];
   parkedVehicles: ParkedVehicle[];
   containers: Container[];
+  outposts: Outpost[];
+  sniperPosts: SniperPost[];
   fountainPos: THREE.Vector3;
   basePos: THREE.Vector3;
 }
@@ -543,6 +569,8 @@ export function generateWorld(): World {
   const hills: TerrainHill[] = [];
   const parkedVehicles: ParkedVehicle[] = [];
   const containers: Container[] = [];
+  const outposts: Outpost[] = [];
+  const sniperPosts: SniperPost[] = [];
 
   // ======================================================================
   //  FUSED NELLIS AIRBASE  (west half) — built in buildBaseCompound()
@@ -948,6 +976,16 @@ export function generateWorld(): World {
   // --- Home base (large forward-operating airbase) near the south edge ----
   const baseWalls = buildBaseCompound(rng, buildings, parkedVehicles, containers, barrels, sandbags, lamps, crates, roads);
 
+  // --- Three desert-rim outposts (前哨陣地) on raised terrain --------------
+  // Forward fortified positions placed at the open outer edge of the map,
+  // each seated on a deliberately raised mound so it commands the surrounding
+  // desert. Every outpost ships explicit sniper nests on its high ground; the
+  // elevation advantage of each nest is recorded on the SniperPost so the AI
+  // and the tactical map can exploit the high ground on purpose.
+  const outpostWalls = buildDesertOutposts(
+    rng, hills, sandbags, crates, barrels, lamps, containers, pickupSpawns, outposts, sniperPosts,
+  );
+
   const walls: Wall[] = [];
   for (const b of buildings) walls.push(...b.walls);
   walls.push(...citadelWalls);
@@ -955,6 +993,7 @@ export function generateWorld(): World {
   walls.push(...baseWalls);
   walls.push(...seamWalls);
   walls.push(...plazaWalls);
+  walls.push(...outpostWalls);
 
   // Ground height (base dunes + authored mounds) used to seat props on the
   // rolling terrain. Mirrors terrainHeightAt() but without needing the World.
@@ -979,6 +1018,19 @@ export function generateWorld(): World {
   // groundAt) is intentional for the tunnel: its bore must sit on the ground
   // *under* the berm mound rather than on top of it.
   for (const w of seamWalls) w.pos.y += baseTerrainHeight(w.pos.x, w.pos.z);
+
+  // Seat the desert-outpost structures onto their raised mounds. Each outpost
+  // wall is built in local coordinates (y measured from the mound's surface),
+  // so lift it by the full terrain height (base dunes + the authored outpost
+  // mound) at its footprint. The same lift is applied to the recorded sniper
+  // posts so their world Y sits exactly on the nest floor on the high ground.
+  for (const w of outpostWalls) w.pos.y += groundAt(w.pos.x, w.pos.z);
+  for (const op of outposts) {
+    const gy = groundAt(op.pos.x, op.pos.z);
+    op.groundY = gy;
+    op.pos.y = gy;
+  }
+  for (const sp of sniperPosts) sp.pos.y += groundAt(sp.pos.x, sp.pos.z);
 
   // Seat ground props onto the terrain so nothing floats or sinks.
   for (const c of crates) c.pos.y += groundAt(c.pos.x, c.pos.z);
@@ -1016,6 +1068,8 @@ export function generateWorld(): World {
     hills,
     parkedVehicles,
     containers,
+    outposts,
+    sniperPosts,
     fountainPos: new THREE.Vector3(CITY_CENTER_X, 0, CITY_CENTER_Z),
     basePos: BASE_POS.clone(),
   };
@@ -1330,6 +1384,248 @@ function buildBaseCompound(
       barrels.push({ pos: new THREE.Vector3(rx + 4 + (d % 2) * 0.9, 0, rz - 2 + d * 1.0), color: d % 2 ? "#3a3a3a" : "#7a4a1a" });
     }
   }
+
+  return walls;
+}
+
+// === DESERT-RIM OUTPOSTS (前哨陣地) =========================================
+// Three forward fortified outposts placed at the open OUTER EDGE of the desert
+// (clear of the airfield, the city core and the citadel). Each one is seated on
+// a deliberately RAISED earth mound (a TerrainHill pushed here) so it physically
+// commands the lower ground around it — the high-ground advantage is built into
+// the terrain, not faked. On top of that high ground every outpost gets:
+//   * a sandbag/HESCO perimeter ring (waist-high cover),
+//   * a two-storey watch/sniper tower with an elevated nest and a parapet,
+//   * one or two flanking elevated sniper berms,
+//   * explicit SniperPost markers (position + facing + measured elevation
+//     advantage) so the AI and the tactical map can use the high ground on
+//     purpose,
+//   * sniper-rifle + ammo pickups as a reward for taking the high ground.
+// Returns the collidable wall segments (built in LOCAL y; the caller lifts them
+// onto the mound). Mounds are appended to `hills` here so they exist before the
+// world's groundAt() seating pass runs.
+function buildDesertOutposts(
+  rng: () => number,
+  hills: TerrainHill[],
+  sandbags: Wall[],
+  crates: Crate[],
+  barrels: Barrel[],
+  lamps: Lamp[],
+  containers: Container[],
+  pickupSpawns: PickupSpawn[],
+  outposts: Outpost[],
+  sniperPosts: SniperPost[],
+): Wall[] {
+  const walls: Wall[] = [];
+
+  // Outpost anchor points around the desert outer rim. They are deliberately
+  // spread to the far N, far SE and far W edges so they ring the playable area
+  // and overwatch the approaches into the central battlefield. Each faces
+  // (yaw) roughly toward the contested map center so its sniper lanes look in.
+  const R = WORLD_SIZE * 0.42; // sit well out toward the perimeter wall
+  const defs: { name: string; x: number; z: number; faceYaw: number; moundH: number; moundR: number }[] = [
+    // North-east ridge outpost — on the open desert NORTH of the city (east of
+    // the airfield's flat rectangle), overwatching the northern approach.
+    { name: "北稜前哨", x: WORLD_SIZE * 0.14, z: -R, faceYaw: Math.PI / 2, moundH: 18, moundR: 46 },
+    // South-east dune outpost — overwatches the city's south-east flank.
+    { name: "東丘前哨", x: WORLD_SIZE * 0.34, z: R * 0.92, faceYaw: -Math.PI * 0.75, moundH: 16, moundR: 44 },
+    // South-west escarpment outpost — in the open desert at the far SOUTH-WEST
+    // corner (clear of the airfield's tall flat rectangle), overwatching the
+    // western flank and the south map edge.
+    { name: "西崖前哨", x: -R * 0.55, z: R, faceYaw: -Math.PI / 4, moundH: 20, moundR: 48 },
+  ];
+
+  defs.forEach((d, i) => {
+    const ow = buildOneOutpost(
+      rng, i, d.name, d.x, d.z, d.faceYaw, d.moundH, d.moundR,
+      hills, sandbags, crates, barrels, lamps, containers, pickupSpawns, outposts, sniperPosts,
+    );
+    walls.push(...ow);
+  });
+
+  return walls;
+}
+
+// Build a single desert outpost centred on (cx, cz). Pushes a raised mound onto
+// `hills`, scatters cover/props, and returns the LOCAL-y collidable walls (the
+// tower, parapets and sniper berms). All vertical coordinates are measured from
+// the mound's surface (local ground = 0); the caller adds the terrain height.
+function buildOneOutpost(
+  rng: () => number,
+  id: number,
+  name: string,
+  cx: number,
+  cz: number,
+  faceYaw: number,
+  moundH: number,
+  moundR: number,
+  hills: TerrainHill[],
+  sandbags: Wall[],
+  crates: Crate[],
+  barrels: Barrel[],
+  lamps: Lamp[],
+  containers: Container[],
+  pickupSpawns: PickupSpawn[],
+  outposts: Outpost[],
+  sniperPosts: SniperPost[],
+): Wall[] {
+  const walls: Wall[] = [];
+  const sandColor = "#a8895a";
+  const hescoColor = "#9c8456";
+  const concrete = "#8f8a7e";
+  const concreteDark = "#736e62";
+
+  // Forward (facing) unit vector and its right-hand perpendicular, used to lay
+  // out the tower, berms and sniper lanes relative to the way the outpost looks.
+  const fx = Math.cos(faceYaw);
+  const fz = Math.sin(faceYaw);
+  const rxv = Math.cos(faceYaw + Math.PI / 2);
+  const rzv = Math.sin(faceYaw + Math.PI / 2);
+
+  // 1) Raise the commanding mound. A broad, smooth hill so the whole outpost
+  //    sits clearly above the surrounding desert floor (the explicit 高低差).
+  hills.push({
+    pos: new THREE.Vector3(cx, 0, cz),
+    radius: moundR,
+    height: moundH,
+    color: "#8a7a54",
+  });
+
+  // 2) Sandbag / HESCO perimeter ring on the mound crest (waist-high cover with
+  //    firing gaps). Built as short tangential segments around a circle.
+  const ringR = 13;
+  const ringSegs = 16;
+  for (let s = 0; s < ringSegs; s++) {
+    if (s % 4 === 3) continue; // leave firing gaps / an entrance
+    const a = (s / ringSegs) * Math.PI * 2;
+    const sx = cx + Math.cos(a) * ringR;
+    const sz = cz + Math.sin(a) * ringR;
+    const tang = a + Math.PI / 2;
+    const alongX = Math.abs(Math.cos(tang)) > Math.abs(Math.sin(tang));
+    const segLen = ringR * (Math.PI * 2 / ringSegs) + 1.2;
+    sandbags.push({
+      pos: new THREE.Vector3(sx, 0.55, sz),
+      size: alongX ? new THREE.Vector3(segLen, 1.1, 0.9) : new THREE.Vector3(0.9, 1.1, segLen),
+      color: hescoColor,
+      kind: "barrier",
+    });
+  }
+
+  // 3) Watch / sniper TOWER at the rear of the ring (opposite the facing dir so
+  //    the nest looks out over the perimeter toward the battlefield). A hollow
+  //    concrete shaft carrying an elevated open nest with a parapet — the
+  //    primary high-ground firing position.
+  const towerH = 7.0;            // shaft height above the mound
+  const towerW = 5.0;            // shaft footprint
+  const tx = cx - fx * (ringR - 2.5);
+  const tz = cz - fz * (ringR - 2.5);
+  const wt = 0.5;
+  const hw = towerW / 2;
+  walls.push({ pos: new THREE.Vector3(tx, towerH / 2, tz + hw), size: new THREE.Vector3(towerW, towerH, wt), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx, towerH / 2, tz - hw), size: new THREE.Vector3(towerW, towerH, wt), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx + hw, towerH / 2, tz), size: new THREE.Vector3(wt, towerH, towerW), color: concrete, kind: "wall" });
+  walls.push({ pos: new THREE.Vector3(tx - hw, towerH / 2, tz), size: new THREE.Vector3(wt, towerH, towerW), color: concrete, kind: "wall" });
+  // Nest floor slab on top of the shaft.
+  const nestY = towerH;
+  walls.push({ pos: new THREE.Vector3(tx, nestY + 0.15, tz), size: new THREE.Vector3(towerW + 1.2, 0.3, towerW + 1.2), color: concreteDark, kind: "floor" });
+  // Low parapet around the nest (cover at the firing line).
+  const pH = 0.95;
+  const pT = 0.35;
+  const pY = nestY + 0.3 + pH / 2;
+  const nHalf = (towerW + 1.2) / 2;
+  walls.push({ pos: new THREE.Vector3(tx, pY, tz + nHalf), size: new THREE.Vector3(towerW + 1.4, pH, pT), color: concrete, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx, pY, tz - nHalf), size: new THREE.Vector3(towerW + 1.4, pH, pT), color: concrete, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx + nHalf, pY, tz), size: new THREE.Vector3(pT, pH, towerW + 1.4), color: concrete, kind: "barrier" });
+  walls.push({ pos: new THREE.Vector3(tx - nHalf, pY, tz), size: new THREE.Vector3(pT, pH, towerW + 1.4), color: concrete, kind: "barrier" });
+  // Stepped ramp climbing the inside face of the tower up to the nest so the
+  // player/AI can actually reach the high firing position.
+  const rampSteps = 8;
+  for (let s = 0; s < rampSteps; s++) {
+    const t = (s + 1) / rampSteps;
+    const y = nestY * t;
+    // Climb toward the tower from the ring center side (the +face direction).
+    const rr = (ringR - 2.5) - s * ((ringR - 4.0) / rampSteps);
+    const sxp = cx - fx * rr;
+    const szp = cz - fz * rr;
+    walls.push({
+      pos: new THREE.Vector3(sxp, y / 2, szp),
+      size: new THREE.Vector3(2.4, Math.max(0.4, y), 2.4),
+      color: concreteDark,
+      kind: "floor",
+    });
+  }
+
+  // The tower nest is the PRIMARY sniper post. Record it with its measured
+  // elevation advantage (mound height + tower height) over the desert floor.
+  const towerNestElevation = moundH + nestY;
+  sniperPosts.push({
+    pos: new THREE.Vector3(tx, nestY + 0.45, tz),
+    yaw: faceYaw,
+    elevation: towerNestElevation,
+    outpostId: id,
+  });
+  // Reward for holding the high ground: a sniper rifle + ammo on the nest.
+  pickupSpawns.push({ pos: new THREE.Vector3(tx, nestY + 0.7, tz), kind: "weapon", weaponId: "sniper" });
+  pickupSpawns.push({ pos: new THREE.Vector3(tx + 0.8, nestY + 0.6, tz), kind: "ammo", amount: 60 });
+
+  // 4) Two flanking elevated sniper BERMS on the forward arc — raised concrete
+  //    pads (knee-to-waist height) flush with the parapet, giving secondary
+  //    high-ground positions that cover the approaches from the sides.
+  const bermElevation = moundH + 1.3;
+  for (const side of [-1, 1]) {
+    const bx = cx + fx * (ringR - 4) + rxv * side * (ringR - 3);
+    const bz = cz + fz * (ringR - 4) + rzv * side * (ringR - 3);
+    // Raised pad to stand on.
+    walls.push({ pos: new THREE.Vector3(bx, 0.65, bz), size: new THREE.Vector3(3.2, 1.3, 3.2), color: concreteDark, kind: "floor" });
+    // A forward sandbag lip for the prone firing line.
+    sandbags.push({
+      pos: new THREE.Vector3(bx + fx * 1.6, 1.55, bz + fz * 1.6),
+      size: Math.abs(fx) > Math.abs(fz) ? new THREE.Vector3(0.9, 0.9, 3.2) : new THREE.Vector3(3.2, 0.9, 0.9),
+      color: hescoColor,
+      kind: "barrier",
+    });
+    // Each berm is an explicit secondary sniper post (faces the same lane,
+    // angled slightly outward to fan the coverage).
+    sniperPosts.push({
+      pos: new THREE.Vector3(bx, 1.55, bz),
+      yaw: faceYaw + side * 0.35,
+      elevation: bermElevation,
+      outpostId: id,
+    });
+  }
+  // A little extra sniper ammo split between the berms.
+  pickupSpawns.push({ pos: new THREE.Vector3(cx + fx * (ringR - 4), 1.7, cz + fz * (ringR - 4)), kind: "ammo", amount: 40 });
+
+  // 5) Set-dressing on the mound: a couple of CONEX boxes, supply crates,
+  //    fuel drums and a floodlight pole so the outpost reads as occupied.
+  containers.push({
+    pos: new THREE.Vector3(cx - rxv * (ringR - 6), 0, cz - rzv * (ringR - 6)),
+    size: new THREE.Vector3(6.0, 2.5, 2.4),
+    yaw: faceYaw,
+    color: "#5a6b4a",
+  });
+  for (let c = 0; c < 4; c++) {
+    crates.push({
+      pos: new THREE.Vector3(cx + (rng() - 0.5) * 8, 0.55, cz + (rng() - 0.5) * 8),
+      size: 1.0 + rng() * 0.5,
+      color: "#7a5028",
+    });
+  }
+  for (let b = 0; b < 3; b++) {
+    barrels.push({ pos: new THREE.Vector3(cx + rxv * (4 + b), 0, cz + rzv * (4 + b)), color: b % 2 ? "#3a3a3a" : "#7a4a1a" });
+  }
+  lamps.push({ pos: new THREE.Vector3(tx, 0, tz + (faceYaw === 0 ? 3 : 0)) });
+
+  // 6) Register the outpost (ground center filled in by the caller's seating
+  //    pass; here we store the local center and footprint).
+  outposts.push({
+    id,
+    pos: new THREE.Vector3(cx, 0, cz),
+    groundY: 0,
+    radius: moundR,
+    name,
+    sniperPosts: sniperPosts.filter((sp) => sp.outpostId === id),
+  });
 
   return walls;
 }
@@ -1951,6 +2247,8 @@ export function buildMapData(world: World): MapData {
     // The airfield and home base are now one fused facility.
     { x: BASE_POS.x, z: BASE_POS.z, name: "AIRBASE" },
     { x: CITADEL_X, z: CITADEL_Z, name: "CITADEL" },
+    // Desert-rim outposts (前哨陣地) on the high ground.
+    ...world.outposts.map((op) => ({ x: op.pos.x, z: op.pos.z, name: op.name })),
   ];
 
   _mapDataCache = {
