@@ -3,7 +3,7 @@ import { GameState, store } from "./store";
 import type { World } from "./world";
 import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS, BASE_HALF_Z } from "./world";
 import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, makeWeaponState } from "./weapons";
-import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass } from "./types";
+import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass, SpawnPoint } from "./types";
 import { CLASSES } from "./classes";
 import { soundEngine } from "./sound";
 
@@ -48,7 +48,7 @@ export class GameEngine {
     mapTogglePressed?: boolean;
   };
   shootHeld = false;
-  spawnPoints: { name: string; pos: THREE.Vector3 }[] = [];
+  spawnPoints: SpawnPoint[] = [];
   private footstepTimer = 0;
   private lastShotSound = 0;
   private lastHitSound = 0;
@@ -183,20 +183,12 @@ export class GameEngine {
     this.state.weapons.grenade.reserve = lo.grenadeCount;
     this.state.weapons.smoke.reserve = lo.smokeCount;
 
-    // Two spawn points:
-    //  1) Inner spawn: further toward the map center than the old spawn so the
-    //     player starts deeper inside the battlefield.
-    //  2) Base spawn: inside the walled home base near the expanded map's edge
-    //     (where the tank is parked).
-    this.spawnPoints = [
-      // Forward spawn: just outside the fused airbase's north gate, pushed
-      // toward the city so the player starts heading into the battlefield.
-      { name: "FORWARD", pos: this.findSpawnNear(BASE_POS.x + 20, BASE_POS.z - BASE_HALF_Z - 40, 25) },
-      // Base spawn: deep inside the walled compound (on the apron).
-      { name: "BASE", pos: this.findSpawnNear(BASE_POS.x, BASE_POS.z, 14) },
-    ];
-    // Player starts at the home base by default.
-    const startSpawn = this.spawnPoints[1].pos;
+    // Build the selectable deployment points (rear → frontline).
+    this.spawnPoints = this.buildSpawnPoints();
+    // Player starts at the spawn they chose in the loadout screen (clamped to a
+    // valid index; defaults to the home base).
+    const idx = Math.max(0, Math.min(this.spawnPoints.length - 1, lo.spawnIndex ?? 0));
+    const startSpawn = this.spawnPoints[idx].pos;
     this.state.player.pos.copy(startSpawn);
 
     // Init sound for everyone
@@ -222,6 +214,62 @@ export class GameEngine {
 
     this.spawnCapturePoints();
     this.spawnVehicles();
+  }
+
+  // Static metadata for the selectable spawn points, ordered rear → front.
+  // The UI (loadout screen) reads this so it can list the options before a
+  // match (and therefore before real positions are resolved). `cx`/`cz` are the
+  // nominal centers; buildSpawnPoints() resolves a collision-free position
+  // nearby at match start.
+  static readonly SPAWN_DEFS: {
+    name: string;
+    desc: string;
+    cx: number;
+    cz: number;
+    radius: number;
+    frontline: boolean;
+  }[] = [
+    {
+      name: "本拠地",
+      desc: "壁に囲まれた飛行場の奥。最も安全な後方。",
+      cx: BASE_POS.x,
+      cz: BASE_POS.z,
+      radius: 14,
+      frontline: false,
+    },
+    {
+      name: "前哨ゲート",
+      desc: "基地北門のすぐ外。戦場へ向かう中継点。",
+      cx: BASE_POS.x + 20,
+      cz: BASE_POS.z - BASE_HALF_Z - 40,
+      radius: 25,
+      frontline: false,
+    },
+    {
+      name: "市街地外縁",
+      desc: "市街地の入口。中央へ素早く展開できる。",
+      cx: WORLD_SIZE * 0.14,
+      cz: WORLD_SIZE * 0.18,
+      radius: 30,
+      frontline: true,
+    },
+    {
+      name: "中央広場【最前線】",
+      desc: "マップ中央の係争地。即座に激戦に突入する。",
+      cx: 0,
+      cz: 0,
+      radius: 26,
+      frontline: true,
+    },
+  ];
+
+  private buildSpawnPoints(): SpawnPoint[] {
+    return GameEngine.SPAWN_DEFS.map((d) => ({
+      name: d.name,
+      desc: d.desc,
+      pos: this.findSpawnNear(d.cx, d.cz, d.radius),
+      frontline: d.frontline,
+    }));
   }
 
   private findSpawnNear(cx: number, cz: number, radius: number): THREE.Vector3 {
@@ -254,9 +302,32 @@ export class GameEngine {
   spawnSoldier(team: Team, soldierClass?: SoldierClass) {
     const cls = soldierClass || (["assault", "sniper", "support", "medic"] as SoldierClass[])[Math.floor(Math.random() * 4)];
     const classSpec = CLASSES[cls];
-    const baseZ = team === "blue" ? WORLD_SIZE / 2 - 25 : -WORLD_SIZE / 2 + 25;
-    const baseX = (Math.random() - 0.5) * 60;
-    const spawn = this.findSpawnNear(baseX, baseZ, 25);
+
+    // To create more intense, immediate fighting, the large majority of AI
+    // soldiers deploy at FORWARD / FRONTLINE positions pushed toward the
+    // contested map center instead of deep in their home base. Only a minority
+    // spawn at the rear (reinforcements trickling in from base).
+    //   - ~75% frontline: near the center (PLAZA) staggered toward each team's
+    //     side, so both teams collide around the middle of the map.
+    //   - ~25% rear: classic home-base spawn.
+    const frontline = Math.random() < 0.75;
+    let baseX: number;
+    let baseZ: number;
+    let radius: number;
+    if (frontline) {
+      // Frontline band: close to center, offset toward this team's side so they
+      // advance into each other. blue comes from +Z (south), red from -Z (north).
+      const sign = team === "blue" ? 1 : -1;
+      baseX = (Math.random() - 0.5) * (WORLD_SIZE * 0.5);
+      baseZ = sign * (WORLD_SIZE * (0.06 + Math.random() * 0.16));
+      radius = 40;
+    } else {
+      // Rear / home-base reinforcement spawn.
+      baseZ = team === "blue" ? WORLD_SIZE / 2 - 25 : -WORLD_SIZE / 2 + 25;
+      baseX = (Math.random() - 0.5) * 60;
+      radius = 25;
+    }
+    const spawn = this.findSpawnNear(baseX, baseZ, radius);
     const s: Soldier = {
       id: this.state.nextSoldierId++,
       team,

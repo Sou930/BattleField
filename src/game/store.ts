@@ -128,6 +128,7 @@ export function createInitialState(): GameState {
       grenadeCount: 3,
       smokeCount: 2,
       soldierClass: "assault",
+      spawnIndex: 0,
     },
     captureTickTimer: 0,
     mapOpen: false,

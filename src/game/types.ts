@@ -174,6 +174,18 @@ export interface Loadout {
   grenadeCount: number;
   smokeCount: number;
   soldierClass: SoldierClass;
+  // Index into the engine's spawnPoints[] the player wants to deploy at.
+  spawnIndex: number;
+}
+
+// A selectable deployment location. `frontline` points sit close to the
+// contested center of the map (more immediate, intense combat); non-frontline
+// points are safer rear positions.
+export interface SpawnPoint {
+  name: string;
+  desc: string;
+  pos: THREE.Vector3;
+  frontline: boolean;
 }
 
 // === CAPTURE POINT ===

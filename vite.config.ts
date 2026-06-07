@@ -19,6 +19,8 @@ export default defineConfig({
   server: {
     host: "::",
     port: 8080,
+    // Allow the sandbox proxy host to reach the dev server.
+    allowedHosts: true,
     hmr: {
       overlay: false,
     },
