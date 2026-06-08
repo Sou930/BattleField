@@ -2526,143 +2526,304 @@ function VehiclesScene() {
 // nozzle(s); those cones carry userData.isFlame so AircraftScene can flicker
 // them every frame.
 
-// A small additive-ish exhaust flame that points backwards (+Z in model space,
-// which is the tail end). Animated each frame in AircraftScene.
-function makeEngineFlame(): THREE.Mesh {
-  const geo = new THREE.ConeGeometry(0.15, 0.6, 8);
-  const mat = new THREE.MeshBasicMaterial({
-    color: '#ff6a00',
-    transparent: true,
-    opacity: 0.85,
-    depthWrite: false,
-  });
+// A layered additive-ish exhaust flame that points backwards (+Z in model
+// space, which is the tail end). Built from two nested cones (a hot white-blue
+// inner core + an orange outer plume) so the afterburner reads with depth.
+// Animated each frame in AircraftScene.
+function makeEngineFlame(scale = 1): THREE.Group {
+  const grp = new THREE.Group();
+  // Outer orange plume.
+  const outer = new THREE.Mesh(
+    new THREE.ConeGeometry(0.17 * scale, 0.9 * scale, 12),
+    new THREE.MeshBasicMaterial({ color: '#ff6a00', transparent: true, opacity: 0.55, depthWrite: false }),
+  );
+  outer.rotation.x = -Math.PI / 2;
+  outer.position.z = 0.1 * scale;
+  grp.add(outer);
+  // Inner hot core.
+  const inner = new THREE.Mesh(
+    new THREE.ConeGeometry(0.09 * scale, 0.5 * scale, 10),
+    new THREE.MeshBasicMaterial({ color: '#ffd27f', transparent: true, opacity: 0.9, depthWrite: false }),
+  );
+  inner.rotation.x = -Math.PI / 2;
+  grp.add(inner);
+  grp.userData.isFlame = true;
+  return grp;
+}
+
+// Build a smooth, tapering fuselage from a LatheGeometry profile. The profile
+// is described in (radius, length) pairs along the body axis; we lathe it about
+// the Y axis then rotate it so the long axis runs along Z (nose -Z, tail +Z).
+// Far higher poly than a stretched box and gives a real rounded cross-section.
+function makeFuselage(
+  profile: Array<[number, number]>, // [radius, z-from-nose]
+  mat: THREE.Material,
+  radialSegs = 20,
+): THREE.Mesh {
+  const totalLen = profile[profile.length - 1][1] - profile[0][1];
+  const nose = profile[0][1];
+  const pts: THREE.Vector2[] = profile.map(([r, z]) => new THREE.Vector2(Math.max(0.0001, r), z - nose));
+  const geo = new THREE.LatheGeometry(pts, radialSegs);
+  // Lathe spins about +Y producing a body along Y; rotate to lie along Z and
+  // recentre so the model origin sits roughly at the wing root.
+  geo.rotateX(Math.PI / 2);
+  geo.translate(0, 0, nose);
   const m = new THREE.Mesh(geo, mat);
-  // Cone points along +Y by default; rotate so the tip faces backwards (+Z)
-  // i.e. trailing behind the aircraft's tail.
-  m.rotation.x = -Math.PI / 2;
-  m.userData.isFlame = true;
+  m.castShadow = true;
+  void totalLen;
   return m;
 }
 
-// Sleek interceptor silhouette. Model nose faces -Z, tail +Z.
-function buildFighterMesh(g: THREE.Group) {
-  const body = new THREE.MeshStandardMaterial({ color: '#4a5a6a', roughness: 0.6, metalness: 0.3 });
-  const wing = new THREE.MeshStandardMaterial({ color: '#3a4a5a', roughness: 0.6, metalness: 0.3 });
-  const dark = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.8, metalness: 0.4 });
-  const missileMat = new THREE.MeshStandardMaterial({ color: '#888888', roughness: 0.5, metalness: 0.5 });
+// A swept wing built as an extruded trapezoid (leading-edge sweep + taper),
+// far closer to a real planform than a flat box. Returned centred at the root.
+function makeWing(
+  rootChord: number,
+  tipChord: number,
+  span: number,
+  sweep: number,
+  thickness: number,
+  mat: THREE.Material,
+): THREE.Mesh {
+  // Half-wing profile in the X(span)/Z(chord) plane, extruded in Y (thickness).
+  const shape = new THREE.Shape();
+  shape.moveTo(0, -rootChord / 2);
+  shape.lineTo(0, rootChord / 2);
+  shape.lineTo(span, sweep + tipChord / 2);
+  shape.lineTo(span, sweep - tipChord / 2);
+  shape.closePath();
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, steps: 1 });
+  geo.translate(0, 0, -thickness / 2);
+  geo.rotateX(-Math.PI / 2); // extrude depth (was +Z) becomes +Y thickness
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  return m;
+}
 
-  // Fuselage.
-  const fuselage = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 6.0), body);
-  fuselage.castShadow = true;
+// Sleek interceptor silhouette. Model nose faces -Z, tail +Z. High-poly:
+// lathed fuselage, pointed radome, bubble canopy, swept wings + canards,
+// twin tails, intakes, a nose cannon and detailed underwing missiles.
+function buildFighterMesh(g: THREE.Group) {
+  const body = new THREE.MeshStandardMaterial({ color: '#566472', roughness: 0.5, metalness: 0.45 });
+  const wing = new THREE.MeshStandardMaterial({ color: '#46545f', roughness: 0.55, metalness: 0.4 });
+  const dark = new THREE.MeshStandardMaterial({ color: '#161616', roughness: 0.7, metalness: 0.5 });
+  const steel = new THREE.MeshStandardMaterial({ color: '#9aa3ad', roughness: 0.35, metalness: 0.85 });
+  const missileMat = new THREE.MeshStandardMaterial({ color: '#cfd3d8', roughness: 0.4, metalness: 0.55 });
+  const warhead = new THREE.MeshStandardMaterial({ color: '#b03a2e', roughness: 0.5, metalness: 0.3 });
+  const glass = new THREE.MeshStandardMaterial({ color: '#0d2233', transparent: true, opacity: 0.55, roughness: 0.05, metalness: 0.9 });
+
+  // --- Lathed fuselage: pointed nose radome → wide mid body → tapered tail ---
+  // Profile pairs are (radius, z) with the nose at z=-3.4 and tail at z=3.6.
+  const fuselage = makeFuselage([
+    [0.02, -3.4], [0.10, -3.1], [0.24, -2.6], [0.36, -1.9], [0.44, -1.0],
+    [0.46, 0.0], [0.45, 1.0], [0.40, 2.0], [0.32, 2.9], [0.24, 3.6],
+  ], body, 22);
   g.add(fuselage);
 
-  // Main wing.
-  const mainWing = new THREE.Mesh(new THREE.BoxGeometry(10.0, 0.15, 2.2), wing);
-  mainWing.position.set(0, 0, -0.3);
-  mainWing.castShadow = true;
-  g.add(mainWing);
-  // Tapered wing tips (thin trailing extensions) to break up the slab.
+  // Slender pitot/cannon protruding from the nose tip.
+  const pitot = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.04, 0.9, 8), steel);
+  pitot.rotation.x = Math.PI / 2;
+  pitot.position.set(0, 0, -3.8);
+  g.add(pitot);
+
+  // Dorsal spine fairing (boxy raised back) for surface relief.
+  const spine = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.22, 2.6), body);
+  spine.position.set(0, 0.34, 0.9);
+  spine.castShadow = true;
+  g.add(spine);
+
+  // --- Swept main wings (left + right) ---
   for (const s of [-1, 1]) {
-    const tip = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 1.2), wing);
-    tip.position.set(s * 5.0, 0, -0.1);
-    g.add(tip);
+    const w = makeWing(2.4, 0.8, 5.0, 1.6, 0.12, wing);
+    w.scale.x = s;
+    w.position.set(s * 0.42, -0.05, 0.2);
+    g.add(w);
+    // Wingtip missile rail launcher.
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 1.0), dark);
+    rail.position.set(s * 5.0, -0.05, 1.6);
+    g.add(rail);
   }
 
-  // Vertical tail.
-  const vTail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.8, 2.0), wing);
-  vTail.position.set(0, 0.8, 2.2);
-  vTail.castShadow = true;
-  g.add(vTail);
+  // --- Forward canards (small swept foreplanes near the cockpit) ---
+  for (const s of [-1, 1]) {
+    const c = makeWing(0.7, 0.25, 1.4, 0.5, 0.07, wing);
+    c.scale.x = s;
+    c.position.set(s * 0.4, 0.05, -1.6);
+    g.add(c);
+  }
 
-  // Horizontal tail.
-  const hTail = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.12, 1.0), wing);
-  hTail.position.set(0, 0.2, 2.3);
-  hTail.castShadow = true;
-  g.add(hTail);
+  // --- Twin canted vertical tails ---
+  for (const s of [-1, 1]) {
+    const vt = makeWing(1.5, 0.6, 1.5, 0.7, 0.1, wing);
+    vt.rotation.z = Math.PI / 2;        // stand the wing up
+    vt.rotation.y = s * 0.18;           // cant outward
+    vt.position.set(s * 0.35, 0.45, 2.6);
+    g.add(vt);
+  }
+  // --- Horizontal stabilators ---
+  for (const s of [-1, 1]) {
+    const h = makeWing(0.9, 0.35, 1.6, 0.5, 0.08, wing);
+    h.scale.x = s;
+    h.position.set(s * 0.35, 0.05, 2.7);
+    g.add(h);
+  }
 
-  // Cockpit canopy.
-  const cockpit = new THREE.Mesh(
-    new THREE.BoxGeometry(0.65, 0.5, 1.2),
-    new THREE.MeshStandardMaterial({ color: '#1b3040', transparent: true, opacity: 0.85, roughness: 0.2, metalness: 0.6 }),
-  );
-  cockpit.position.set(0, 0.4, -0.8);
-  g.add(cockpit);
+  // --- Side air intakes (boxy ducts under the cockpit shoulders) ---
+  for (const s of [-1, 1]) {
+    const intake = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.42, 1.6), body);
+    intake.position.set(s * 0.55, -0.18, -0.7);
+    intake.castShadow = true;
+    g.add(intake);
+    // Dark intake mouth.
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.36, 0.12), dark);
+    mouth.position.set(s * 0.55, -0.18, -1.5);
+    g.add(mouth);
+  }
 
-  // Engine nozzle (tail).
-  const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 0.6, 12), dark);
-  nozzle.rotation.x = Math.PI / 2;
-  nozzle.position.set(0, 0, 3.2);
-  g.add(nozzle);
+  // --- Bubble cockpit canopy (half-capsule of glass) ---
+  const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.42, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2), glass);
+  canopy.scale.set(0.8, 0.7, 1.9);
+  canopy.position.set(0, 0.42, -1.1);
+  g.add(canopy);
+  // Canopy frame strip.
+  const frame = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.03, 8, 20, Math.PI), dark);
+  frame.rotation.y = Math.PI / 2;
+  frame.position.set(0, 0.42, -1.1);
+  g.add(frame);
 
-  // Engine flame trailing behind the nozzle.
-  const flame = makeEngineFlame();
-  flame.position.set(0, 0, 3.7);
+  // --- Engine nozzle + afterburner ---
+  const nozzleOuter = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.22, 0.7, 16), steel);
+  nozzleOuter.rotation.x = Math.PI / 2;
+  nozzleOuter.position.set(0, 0, 3.5);
+  g.add(nozzleOuter);
+  const nozzleInner = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.16, 0.5, 16), dark);
+  nozzleInner.rotation.x = Math.PI / 2;
+  nozzleInner.position.set(0, 0, 3.6);
+  g.add(nozzleInner);
+  const flame = makeEngineFlame(1.1);
+  flame.position.set(0, 0, 3.95);
   g.add(flame);
 
-  // Two underwing missiles.
-  for (const x of [-2.5, 2.5]) {
-    const missile = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8), missileMat);
-    missile.rotation.x = Math.PI / 2;
-    missile.position.set(x, -0.2, -0.3);
+  // --- Two detailed underwing missiles (body + nose cone + 4 tail fins) ---
+  for (const x of [-2.6, 2.6]) {
+    const missile = new THREE.Group();
+    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.4, 12), missileMat);
+    tube.rotation.x = Math.PI / 2;
+    missile.add(tube);
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.3, 12), warhead);
+    tip.rotation.x = -Math.PI / 2;
+    tip.position.z = -0.85;
+    missile.add(tip);
+    for (let f = 0; f < 4; f++) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.22, 0.3), dark);
+      fin.position.z = 0.6;
+      fin.rotation.z = (f * Math.PI) / 2;
+      fin.translateY(0.13);
+      missile.add(fin);
+    }
+    missile.position.set(x, -0.32, 0.0);
     g.add(missile);
   }
 }
 
-// Heavier ground-attack silhouette. Model nose faces -Z, tail +Z.
+// Heavier ground-attack silhouette. Model nose faces -Z, tail +Z. High-poly:
+// lathed bulky fuselage, glassy stepped canopy, straight wings with twin
+// underslung turbofan nacelles, twin tails and a row of detailed belly bombs.
 function buildAttackerMesh(g: THREE.Group) {
-  const body = new THREE.MeshStandardMaterial({ color: '#5a4a3a', roughness: 0.7, metalness: 0.2 });
-  const wing = new THREE.MeshStandardMaterial({ color: '#4a3a2a', roughness: 0.7, metalness: 0.2 });
-  const dark = new THREE.MeshStandardMaterial({ color: '#1a1a1a', roughness: 0.8, metalness: 0.4 });
-  const rackMat = new THREE.MeshStandardMaterial({ color: '#333333', roughness: 0.8, metalness: 0.3 });
+  const body = new THREE.MeshStandardMaterial({ color: '#5e5340', roughness: 0.65, metalness: 0.25 });
+  const wing = new THREE.MeshStandardMaterial({ color: '#4d4434', roughness: 0.7, metalness: 0.2 });
+  const dark = new THREE.MeshStandardMaterial({ color: '#171717', roughness: 0.75, metalness: 0.45 });
+  const steel = new THREE.MeshStandardMaterial({ color: '#8a8a8a', roughness: 0.4, metalness: 0.8 });
+  const bombMat = new THREE.MeshStandardMaterial({ color: '#3c4a2e', roughness: 0.6, metalness: 0.3 });
+  const glass = new THREE.MeshStandardMaterial({ color: '#11261f', transparent: true, opacity: 0.55, roughness: 0.08, metalness: 0.85 });
 
-  // Fuselage.
-  const fuselage = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.8, 5.2), body);
-  fuselage.castShadow = true;
+  // --- Lathed bulky fuselage (blunt nose, wide belly, tapered tail) ---
+  const fuselage = makeFuselage([
+    [0.10, -3.0], [0.34, -2.5], [0.52, -1.7], [0.62, -0.8], [0.66, 0.0],
+    [0.64, 0.9], [0.56, 1.9], [0.42, 2.8], [0.28, 3.5],
+  ], body, 22);
   g.add(fuselage);
 
-  // Main wing.
-  const mainWing = new THREE.Mesh(new THREE.BoxGeometry(11.0, 0.18, 3.0), wing);
-  mainWing.position.set(0, 0, 0);
-  mainWing.castShadow = true;
-  g.add(mainWing);
+  // Chin sensor/cannon fairing under the nose.
+  const chin = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.1, 0.9, 12), dark);
+  chin.rotation.x = Math.PI / 2;
+  chin.position.set(0, -0.42, -2.4);
+  g.add(chin);
 
-  // Vertical tail.
-  const vTail = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2.0, 2.2), wing);
-  vTail.position.set(0, 0.9, 2.0);
-  vTail.castShadow = true;
-  g.add(vTail);
+  // --- Straight (low-sweep) main wings ---
+  for (const s of [-1, 1]) {
+    const w = makeWing(3.0, 1.4, 5.5, 0.6, 0.16, wing);
+    w.scale.x = s;
+    w.position.set(s * 0.55, -0.1, 0.1);
+    g.add(w);
+  }
 
-  // Horizontal tail.
-  const hTail = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.14, 1.2), wing);
-  hTail.position.set(0, 0.1, 2.1);
-  hTail.castShadow = true;
-  g.add(hTail);
-
-  // Cockpit canopy.
-  const cockpit = new THREE.Mesh(
-    new THREE.BoxGeometry(0.85, 0.6, 1.4),
-    new THREE.MeshStandardMaterial({ color: '#1b2830', transparent: true, opacity: 0.85, roughness: 0.2, metalness: 0.6 }),
-  );
-  cockpit.position.set(0, 0.5, -0.6);
-  g.add(cockpit);
-
-  // Twin engines (wing-mounted) + flames.
-  for (const x of [-1.2, 1.2]) {
-    const eng = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.32, 0.8, 12), dark);
-    eng.rotation.x = Math.PI / 2;
-    eng.position.set(x, 0, 2.2);
-    g.add(eng);
-    const flame = makeEngineFlame();
-    flame.position.set(x, 0, 2.8);
+  // --- Twin underslung turbofan nacelles + flames ---
+  for (const x of [-1.7, 1.7]) {
+    const nacelle = makeFuselage([
+      [0.05, -1.0], [0.26, -0.7], [0.32, -0.2], [0.32, 0.6], [0.26, 1.0], [0.2, 1.2],
+    ], steel, 16);
+    nacelle.position.set(x, -0.45, 0.4);
+    g.add(nacelle);
+    // Intake lip.
+    const lip = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.05, 8, 18), dark);
+    lip.position.set(x, -0.45, -0.6);
+    g.add(lip);
+    const flame = makeEngineFlame(1.0);
+    flame.position.set(x, -0.45, 1.9);
     g.add(flame);
   }
 
-  // Four belly bomb-rack stubs, distributed along z = -1 .. 1.
-  for (let i = 0; i < 4; i++) {
-    const z = -1 + (i * 2) / 3; // -1, -0.333, 0.333, 1
-    const rack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.8), rackMat);
-    rack.position.set(0, -0.55, z);
+  // --- Twin vertical tails (outboard) ---
+  for (const s of [-1, 1]) {
+    const vt = makeWing(1.6, 0.7, 1.7, 0.6, 0.12, wing);
+    vt.rotation.z = Math.PI / 2;
+    vt.position.set(s * 0.55, 0.5, 2.7);
+    g.add(vt);
+  }
+  // --- Horizontal tail ---
+  for (const s of [-1, 1]) {
+    const h = makeWing(1.1, 0.5, 1.9, 0.5, 0.1, wing);
+    h.scale.x = s;
+    h.position.set(s * 0.3, 0.1, 2.9);
+    g.add(h);
+  }
+
+  // --- Stepped glassy cockpit canopy ---
+  const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.55, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2), glass);
+  canopy.scale.set(0.85, 0.8, 1.8);
+  canopy.position.set(0, 0.5, -1.2);
+  g.add(canopy);
+  const windscreen = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.5), glass);
+  windscreen.position.set(0, 0.45, -1.9);
+  windscreen.rotation.x = 0.3;
+  g.add(windscreen);
+
+  // --- Belly bomb-rack pylons + six detailed bombs ---
+  for (let i = 0; i < 6; i++) {
+    const x = (i % 2 === 0 ? -1 : 1) * 0.8;
+    const z = -1.2 + Math.floor(i / 2) * 1.1;
+    // Pylon stub.
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.28, 0.5), dark);
+    rack.position.set(x, -0.55, z);
     g.add(rack);
+    // Bomb (body + nose cone + tail fins).
+    const bomb = new THREE.Group();
+    const bb = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.9, 12), bombMat);
+    bb.rotation.x = Math.PI / 2;
+    bomb.add(bb);
+    const bnose = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.3, 12), bombMat);
+    bnose.rotation.x = -Math.PI / 2;
+    bnose.position.z = -0.6;
+    bomb.add(bnose);
+    for (let f = 0; f < 4; f++) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.18, 0.22), dark);
+      fin.position.z = 0.42;
+      fin.rotation.z = (f * Math.PI) / 2;
+      fin.translateY(0.11);
+      bomb.add(fin);
+    }
+    bomb.position.set(x, -0.82, z);
+    g.add(bomb);
   }
 }
 

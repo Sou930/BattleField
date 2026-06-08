@@ -122,6 +122,9 @@ export class GameEngine {
     viewTogglePressed?: boolean;
     aircraftAirbrake?: boolean;
     gearTogglePressed?: boolean;
+    flightStick?: { x: number; y: number };
+    flightStickActive?: boolean;
+    flightThrottle?: number | null;
   };
   shootHeld = false;
   spawnPoints: SpawnPoint[] = [];
@@ -749,22 +752,63 @@ export class GameEngine {
     const p = this.state.player;
 
     // ── 操縦入力 (慣性付きで平滑化) ─────────────────────
-    // マウス: ピッチ & ロール指令。WASD: スロットル & ロール補助。
+    // War Thunder Mobile 風: 操縦スティック(モバイル) を最優先で扱う。
+    //  ・スティック x = ロール/旋回, y = ピッチ (下に倒す = 機首下げ)。
+    //  ・スティックは「倒した量 = 舵指令」の絶対入力なので、画面のどこを向いて
+    //    いても直感的に操縦できる。
+    //  ・スロットルはスライダーで絶対指定 (なければ W/S の相対操作)。
+    // デスクトップではマウスデルタ操作 (従来) にフォールバックする。
     const md = this.input.consumeMouseDelta();
-    const sens = 0.0016;
-    // デッドゾーン: わずかな手ブレ/微振動では舵を切らない (やさしい操縦)。
-    const dyEff = Math.abs(md.dy) < 0.6 ? 0 : md.dy;
-    const dxEff = Math.abs(md.dx) < 0.6 ? 0 : md.dx;
-    // 入力ゲインを控えめ(90→55)にして、急な視点移動でも機体が暴れにくくする。
-    const pitchCmd = THREE.MathUtils.clamp(ac.pitchInput - dyEff * sens * 55, -1, 1);
-    let rollCmd = THREE.MathUtils.clamp(ac.rollInput + dxEff * sens * 55, -1, 1);
+    const stick = this.input.flightStick ?? { x: 0, y: 0 };
+    const usingStick = !!this.input.flightStickActive &&
+      (Math.abs(stick.x) > 0.001 || Math.abs(stick.y) > 0.001);
 
-    if (this.input.keys.has("KeyW"))
-      ac.throttle = Math.min(1, ac.throttle + 0.8 * dt);
-    if (this.input.keys.has("KeyS"))
-      ac.throttle = Math.max(0, ac.throttle - 0.8 * dt);
-    if (this.input.keys.has("KeyA")) rollCmd = -1;
-    if (this.input.keys.has("KeyD")) rollCmd = 1;
+    let pitchCmd: number;
+    let rollCmd: number;
+
+    if (usingStick) {
+      // スティックを倒した量を直接コマンドに。少し非線形(²)にして中央付近を
+      // やさしく、深く倒すほど機敏に効かせる (WT モバイルの感触に近づける)。
+      const sx = THREE.MathUtils.clamp(stick.x, -1, 1);
+      const sy = THREE.MathUtils.clamp(stick.y, -1, 1);
+      const shape = (v: number) => Math.sign(v) * v * v;
+      rollCmd = shape(sx);
+      pitchCmd = -shape(sy); // 画面下に倒す(+y) = 機首下げ(-pitch)
+    } else {
+      const sens = 0.0016;
+      // デッドゾーン: わずかな手ブレ/微振動では舵を切らない (やさしい操縦)。
+      const dyEff = Math.abs(md.dy) < 0.6 ? 0 : md.dy;
+      const dxEff = Math.abs(md.dx) < 0.6 ? 0 : md.dx;
+      // 入力ゲインを控えめ(90→55)にして、急な視点移動でも機体が暴れにくくする。
+      pitchCmd = THREE.MathUtils.clamp(ac.pitchInput - dyEff * sens * 55, -1, 1);
+      rollCmd = THREE.MathUtils.clamp(ac.rollInput + dxEff * sens * 55, -1, 1);
+    }
+
+    // スロットル: スライダーがあれば絶対値で追従、なければ W/S の相対操作。
+    if (this.input.flightThrottle != null) {
+      const target = this.input.flightThrottle;
+      // スライダー値へなめらかに追従 (急なスロットル変化を抑える)。
+      ac.throttle += (target - ac.throttle) * Math.min(1, 6 * dt);
+    } else {
+      if (this.input.keys.has("KeyW"))
+        ac.throttle = Math.min(1, ac.throttle + 0.8 * dt);
+      if (this.input.keys.has("KeyS"))
+        ac.throttle = Math.max(0, ac.throttle - 0.8 * dt);
+    }
+    // キーボードによるロール補助 (デスクトップ)。スティック使用時は無効。
+    if (!usingStick && this.input.keys.has("KeyA")) rollCmd = -1;
+    if (!usingStick && this.input.keys.has("KeyD")) rollCmd = 1;
+
+    // ── 入力アクティブ判定 (センタリング用) ───────────────────────────
+    // スティック / マウス / キーのいずれで操作中かを統一フラグにまとめ、
+    // 「手を離したら舵が中立へ抜ける (静安定)」を入力方式に依らず実現する。
+    const keyRoll = this.input.keys.has("KeyA") || this.input.keys.has("KeyD");
+    const rollActive = usingStick
+      ? Math.abs(stick.x) > 0.06
+      : (keyRoll || Math.abs(md.dx) > 0.5);
+    const pitchActive = usingStick
+      ? Math.abs(stick.y) > 0.06
+      : Math.abs(md.dy) > 0.5;
 
     // ── エアブレーキ (Shift/B 押下中、またはモバイルの AIR BRAKE ホールド) ──
     ac.airbrake = !!this.input.aircraftAirbrake;
@@ -777,14 +821,14 @@ export class GameEngine {
     // 操縦桿を慣性で追従 (操縦の重さ)。
     ac.pitchInput += (pitchCmd - ac.pitchInput) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
     ac.rollInput  += (rollCmd  - ac.rollInput ) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
-    if (!this.input.keys.has("KeyA") && !this.input.keys.has("KeyD") && Math.abs(dxEff) < 0.5)
+    if (!rollActive)
       ac.rollInput *= Math.pow(0.25, dt); // 手を離すと素早くロール入力が抜ける
     // ── ピッチ入力のセンタリング (操縦バグ修正) ──────────────────────
     // 以前は pitchInput が中立へ戻らず、マウスを一度動かすと機首が回り続けて
     // 「ピッチが止まらない / 機体が暴れる」原因になっていた。ロール軸と同様に、
-    // マウスのピッチ入力が無いフレームでは pitchInput を素早く 0 へ減衰させ、
-    // 手を離せばピッチ操作が抜けるようにする (静安定)。
-    if (Math.abs(dyEff) < 0.5) ac.pitchInput *= Math.pow(0.2, dt);
+    // 操縦入力が無いフレームでは pitchInput を素早く 0 へ減衰させ、手を離せば
+    // ピッチ操作が抜けるようにする (静安定)。スティック操作でも同様に機能する。
+    if (!pitchActive) ac.pitchInput *= Math.pow(0.2, dt);
 
     // ── ロール入力 → バンク角 ────────────────────────
     // バンク上限を大きく抑え(約45°)、入力を離すと自動で水平へ戻る(オート

@@ -27,6 +27,15 @@ export class Input {
   // 航空機: ランディングギア(脚)の出し入れトグル
   gearTogglePressed = false;
 
+  // === War Thunder Mobile 風 飛行操作 (モバイル用) =======================
+  // 操縦スティック: x = ロール/旋回 (-1..1), y = ピッチ (-1..1, 下に倒す=機首下げ)。
+  // タッチでスティックを操作している間 flightStickActive=true。離すと中立(0,0)へ。
+  flightStick: MoveVec = { x: 0, y: 0 };
+  flightStickActive = false;
+  // スロットルスライダー: 0..1 の絶対値。null のときはスライダー未使用
+  // (キーボード W/S による相対操作にフォールバック)。
+  flightThrottle: number | null = null;
+
   private el: HTMLElement;
   private onKey = (e: KeyboardEvent, down: boolean) => {
     if (down) this.keys.add(e.code);
@@ -110,4 +119,8 @@ export class Input {
   // 航空機補助操作 (モバイル用)
   setAircraftAirbrake(on: boolean) { this.aircraftAirbrake = on; }
   pressGearToggle() { this.gearTogglePressed = true; }
+  // War Thunder Mobile 風: 操縦スティック & スロットルスライダー
+  setFlightStick(v: MoveVec) { this.flightStick = v; this.flightStickActive = true; }
+  releaseFlightStick() { this.flightStick = { x: 0, y: 0 }; this.flightStickActive = false; }
+  setFlightThrottle(t: number) { this.flightThrottle = Math.max(0, Math.min(1, t)); }
 }
