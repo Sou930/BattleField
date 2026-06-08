@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree, useLoader } from "@react-three/fiber";
 import { useGame as useGameHook } from "@/game/store";
@@ -6,6 +5,7 @@ import * as THREE from "three";
 import { GameEngine } from "@/game/engine";
 import { store, useGame } from "@/game/store";
 import { Input } from "@/game/input";
+import type { Loadout } from "@/game/types";
 import { generateWorld, WORLD_SIZE, terrainHeightAt, pavedFlatHeightAt } from "@/game/world";
 import HUD from "./HUD";
 import drumTopUrl from "@/assets/drum_barrel_top.webp";
@@ -45,6 +45,37 @@ import sandbagNorUrl from "@/assets/new/sandy_gravel_02_nor_gl_1k.webp";
 import sandbagRoughUrl from "@/assets/new/sandy_gravel_02_rough_1k.webp";
 
 const sharedWorld = generateWorld();
+
+// Shape of the per-object `userData` payloads stamped onto pooled THREE
+// objects in the effect groups. THREE types `userData` as `Record<string,
+// unknown>`, so these helpers give us typed access without scattering casts.
+interface SoldierAnim {
+  legL: THREE.Object3D;
+  legR: THREE.Object3D;
+  armL: THREE.Object3D;
+  armR: THREE.Object3D;
+  torso: THREE.Object3D;
+  baseLegLZ: number;
+  armLBaseX: number;
+  armRBaseX: number;
+  torsoBaseY: number;
+}
+
+interface IdUserData {
+  id: number;
+  isFlame?: boolean;
+  anim?: SoldierAnim;
+}
+
+function idData(obj: THREE.Object3D): IdUserData {
+  return obj.userData as IdUserData;
+}
+
+// R3F's useLoader exposes a static `preload` helper that isn't on its public
+// type signature; describe just the slice we use.
+type UseLoaderWithPreload = typeof useLoader & {
+  preload?: (loader: unknown, input: string | string[]) => void;
+};
 
 // --- Runtime perf helpers -------------------------------------------------
 // Recursively dispose the geometries/materials (and their textures) of an
@@ -114,7 +145,7 @@ function preloadTextures() {
   texturesWarmed = true;
   // Prime R3F's useLoader cache so the in-game <Suspense> resolves synchronously.
   try {
-    (useLoader as any).preload?.(THREE.TextureLoader, TEXTURE_URLS);
+    (useLoader as UseLoaderWithPreload).preload?.(THREE.TextureLoader, TEXTURE_URLS);
   } catch {
     /* ignore — preload is a best-effort optimization */
   }
@@ -1451,7 +1482,7 @@ function Pickups() {
       }
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Group;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!liveIds.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -1495,7 +1526,7 @@ function Soldiers() {
       for (let i = 0; i < soldiers.length; i++) ids.add(soldiers[i].id);
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Group;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!ids.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -1516,7 +1547,7 @@ function Soldiers() {
       // moveSpeedNorm: 0 idle, ~1 walk, ~1.5+ sprint. Drive a sinusoidal gait:
       // swing legs at the hip, counter-swing the arms a touch, and add a small
       // vertical bob whose frequency matches the (doubled) stride.
-      const anim = (mesh.userData as any).anim;
+      const anim = idData(mesh).anim;
       const spd = e.moveSpeedNorm ?? 0;
       const phase = e.animPhase ?? 0;
       let bob = 0;
@@ -1788,7 +1819,7 @@ function Grenades() {
       for (let i = 0; i < grenades.length; i++) ids.add(grenades[i].id);
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Mesh;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!ids.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -1874,7 +1905,7 @@ function Hits() {
       const m = g.children[i] as THREE.Mesh;
       m.position.copy(h.point);
       const mat = m.material as THREE.MeshBasicMaterial;
-      (mat as any).transparent = true;
+      mat.transparent = true;
       mat.opacity = Math.min(1, h.ttl / 0.5);
       m.visible = !h.enemyId;
     });
@@ -1999,7 +2030,7 @@ function DestructiblesScene() {
       // Remove meshes for destroyed/removed destructibles.
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Mesh;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!liveIds.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -2450,7 +2481,7 @@ function VehiclesScene() {
       for (let i = 0; i < vehs.length; i++) ids.add(vehs[i].id);
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Group;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!ids.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -2651,7 +2682,7 @@ function AircraftScene() {
       for (let i = 0; i < planes.length; i++) ids.add(planes[i].id);
       for (let i = g.children.length - 1; i >= 0; i--) {
         const c = g.children[i] as THREE.Group;
-        const id = (c.userData as any).id;
+        const id = idData(c).id;
         if (!ids.has(id)) {
           map.delete(id);
           removeAndDispose(g, c);
@@ -2689,7 +2720,7 @@ function AircraftScene() {
       const flicker = Math.sin(time * 60) * 0.2 + 0.9;
       const lit = v.alive && v.throttle > 0.05;
       for (const c of mesh.children) {
-        if ((c as any).userData.isFlame) {
+        if (idData(c).isFlame) {
           c.visible = lit;
           const grow = 0.6 + v.throttle * 0.8;
           c.scale.set(flicker, flicker * grow, flicker);
@@ -2915,7 +2946,7 @@ export default function Game() {
       set aircraftAirbrake(v: boolean) { input.aircraftAirbrake = v; },
       get gearTogglePressed() { return input.gearTogglePressed; },
       set gearTogglePressed(v: boolean) { input.gearTogglePressed = v; },
-    } as any, sharedWorld);
+    } satisfies GameEngine["input"], sharedWorld);
     setEngine(eng);
   }, []);
 
@@ -2947,7 +2978,7 @@ export default function Game() {
     store.emit();
   };
 
-  const startGame = (loadout?: any) => {
+  const startGame = (loadout?: Loadout) => {
     if (loadout) {
       store.state.loadout = loadout;
     }
