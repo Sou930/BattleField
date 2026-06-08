@@ -667,6 +667,17 @@ function Roads() {
     const cache = new Map<string, THREE.ShaderMaterial>();
     const make = (color: string) =>
       new THREE.ShaderMaterial({
+        // The asphalt decals sit only a few centimetres above the flattened
+        // airfield/desert ground. On a coarse displaced terrain mesh the
+        // interpolated surface can poke up THROUGH a thin decal mid-cell, which
+        // made the runway/roads disappear and read as plain sand. A negative
+        // polygon offset pulls these quads toward the camera in the depth
+        // buffer so they ALWAYS win the depth test against the ground and stay
+        // visible, regardless of the tiny height differences between the
+        // stacked surface/shoulder/paint layers (which also stops z-fighting).
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
         uniforms: {
           diffTex: { value: diffTex },
           norTex: { value: norTex },

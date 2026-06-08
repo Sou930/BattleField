@@ -11,7 +11,10 @@ const PLAYER_RADIUS = 0.4;
 const PLAYER_HEIGHT = 1.7;
 const EYE_HEIGHT = 1.65;
 const GRAVITY = 22;
-const MOVE_SPEED = 7.0;
+// Base on-foot movement speed for the player AND the AI soldiers (the AI's run
+// cap is derived from this). Bumped 1.5x (7.0 -> 10.5) so everyone moves at the
+// faster pace requested.
+const MOVE_SPEED = 10.5;
 const SPRINT_MULT = 1.4;
 const JUMP_VEL = 7.5;
 const SOLDIER_RADIUS = 0.5;
@@ -63,12 +66,18 @@ interface VehicleDynamics {
   rollStiff: number;     // body-lean stiffness (visual)
   trackWidth: number;    // resistance to rollover lean (visual)
 }
+// NOTE: the drag-limited terminal speed of each vehicle is ≈ sqrt(enginePower /
+// drag). To make every ground vehicle reach the doubled top speed in
+// VEHICLE_STATS, the aerodynamic `drag` is quartered (÷4) and `enginePower`
+// roughly doubled here — quartering drag alone doubles the terminal speed, and
+// the stronger engine keeps acceleration brisk so the higher cap is actually
+// attained rather than crawled up to.
 const VEHICLE_DYN: Record<Vehicle["kind"], VehicleDynamics> = {
-  jeep:   { mass: 1.0, enginePower: 26, brakePower: 30, grip: 0.78, steerRate: 1.9, steerEase: 7.0, drag: 0.020, rollResist: 0.9, wheelbase: 2.6, rollStiff: 0.040, trackWidth: 1.6 },
-  humvee: { mass: 1.4, enginePower: 24, brakePower: 30, grip: 0.82, steerRate: 1.6, steerEase: 6.0, drag: 0.024, rollResist: 1.0, wheelbase: 3.3, rollStiff: 0.034, trackWidth: 2.0 },
-  truck:  { mass: 2.4, enginePower: 18, brakePower: 22, grip: 0.70, steerRate: 1.2, steerEase: 4.0, drag: 0.034, rollResist: 1.3, wheelbase: 4.2, rollStiff: 0.030, trackWidth: 2.1 },
-  apc:    { mass: 3.2, enginePower: 17, brakePower: 24, grip: 0.88, steerRate: 1.3, steerEase: 4.5, drag: 0.030, rollResist: 1.5, wheelbase: 3.8, rollStiff: 0.022, trackWidth: 2.4 },
-  tank:   { mass: 5.0, enginePower: 15, brakePower: 26, grip: 0.95, steerRate: 1.1, steerEase: 3.5, drag: 0.028, rollResist: 1.8, wheelbase: 4.0, rollStiff: 0.015, trackWidth: 2.8 },
+  jeep:   { mass: 1.0, enginePower: 52, brakePower: 40, grip: 0.78, steerRate: 1.9, steerEase: 7.0, drag: 0.0050, rollResist: 0.9, wheelbase: 2.6, rollStiff: 0.040, trackWidth: 1.6 },
+  humvee: { mass: 1.4, enginePower: 48, brakePower: 40, grip: 0.82, steerRate: 1.6, steerEase: 6.0, drag: 0.0060, rollResist: 1.0, wheelbase: 3.3, rollStiff: 0.034, trackWidth: 2.0 },
+  truck:  { mass: 2.4, enginePower: 36, brakePower: 30, grip: 0.70, steerRate: 1.2, steerEase: 4.0, drag: 0.0085, rollResist: 1.3, wheelbase: 4.2, rollStiff: 0.030, trackWidth: 2.1 },
+  apc:    { mass: 3.2, enginePower: 34, brakePower: 32, grip: 0.88, steerRate: 1.3, steerEase: 4.5, drag: 0.0075, rollResist: 1.5, wheelbase: 3.8, rollStiff: 0.022, trackWidth: 2.4 },
+  tank:   { mass: 5.0, enginePower: 30, brakePower: 34, grip: 0.95, steerRate: 1.1, steerEase: 3.5, drag: 0.0070, rollResist: 1.8, wheelbase: 4.0, rollStiff: 0.015, trackWidth: 2.8 },
 };
 
 // === REALISTIC FLIGHT DYNAMICS =============================================
@@ -179,12 +188,14 @@ export class GameEngine {
   }
 
   // Per-kind drivable vehicle tuning (hp + top speed).
+  // Top speeds doubled (2x) from their original values per request so all
+  // ground vehicles (everything except aircraft) drive twice as fast.
   private static VEHICLE_STATS: Record<Vehicle["kind"], { hp: number; speed: number }> = {
-    jeep: { hp: 300, speed: 32 },
-    humvee: { hp: 360, speed: 30 },
-    truck: { hp: 420, speed: 24 },
-    apc: { hp: 520, speed: 22 },
-    tank: { hp: 600, speed: 20 },
+    jeep: { hp: 300, speed: 64 },
+    humvee: { hp: 360, speed: 60 },
+    truck: { hp: 420, speed: 48 },
+    apc: { hp: 520, speed: 44 },
+    tank: { hp: 600, speed: 40 },
   };
 
   private spawnVehicles() {
@@ -763,6 +774,12 @@ export class GameEngine {
     ac.rollInput  += (rollCmd  - ac.rollInput ) * Math.min(1, AIRCRAFT_CTRL_EASE * dt);
     if (!this.input.keys.has("KeyA") && !this.input.keys.has("KeyD") && Math.abs(dxEff) < 0.5)
       ac.rollInput *= Math.pow(0.25, dt); // 手を離すと素早くロール入力が抜ける
+    // ── ピッチ入力のセンタリング (操縦バグ修正) ──────────────────────
+    // 以前は pitchInput が中立へ戻らず、マウスを一度動かすと機首が回り続けて
+    // 「ピッチが止まらない / 機体が暴れる」原因になっていた。ロール軸と同様に、
+    // マウスのピッチ入力が無いフレームでは pitchInput を素早く 0 へ減衰させ、
+    // 手を離せばピッチ操作が抜けるようにする (静安定)。
+    if (Math.abs(dyEff) < 0.5) ac.pitchInput *= Math.pow(0.2, dt);
 
     // ── ロール入力 → バンク角 ────────────────────────
     // バンク上限を大きく抑え(約45°)、入力を離すと自動で水平へ戻る(オート
@@ -828,6 +845,13 @@ export class GameEngine {
       // ── ピッチ操作: 動圧(速度)が高いほど舵が効く ──
       const q = Math.min(1.3, speed / AIRCRAFT_LIFT_SPEED);
       ac.pitch += ac.pitchInput * 1.7 * q * dt;
+      // ── ピッチのオートレベリング (静安定) ──────────────────────────
+      // 操縦桿(マウス)が中立のときは機首を水平へじわっと戻す。これにより
+      // 手を離せば自然に水平飛行へ復帰し、機体が際限なく上下に振れる挙動を防ぐ。
+      // 入力中は戻し量をほぼ無効化して操縦性は損なわない。
+      if (Math.abs(ac.pitchInput) < 0.12 && !ac.stalling) {
+        ac.pitch -= ac.pitch * Math.min(1, 1.2 * dt);
+      }
       ac.pitch = THREE.MathUtils.clamp(ac.pitch, -Math.PI * 0.49, Math.PI * 0.49);
 
       // ── バンク → 協調旋回: yawRate = g·tan(bank)/v ──
@@ -1992,7 +2016,7 @@ export class GameEngine {
           toGoal.y = 0;
         }
         const move = toGoal.lengthSq() > 0 ? toGoal.clone().normalize() : new THREE.Vector3();
-        this.steerAndMove(s, move, 2.8 * classSpec.speedMult, dt);
+        this.steerAndMove(s, move, 4.2 * classSpec.speedMult, dt);
         s.desiredYaw = Math.atan2(-move.x, -move.z);
         s.yaw += this.shortAngle(s.desiredYaw - s.yaw) * Math.min(1, dt * 4);
         continue;
@@ -2182,7 +2206,8 @@ export class GameEngine {
       // sprinting (engaged states such as chase/flank/retreat) its movement is
       // capped at the player's sprint pace (MOVE_SPEED * SPRINT_MULT), so an AI
       // running never out-paces a running player.
-      const baseSpeed = 5.0;
+      // AI base jog speed, scaled 1.5x (5.0 -> 7.5) to match the faster player.
+      const baseSpeed = 7.5;
       const PLAYER_SPRINT_SPEED = MOVE_SPEED * SPRINT_MULT;
       const desiredSpeed = baseSpeed * classSpec.speedMult * speedMult;
       const finalSpeed = Math.min(desiredSpeed, PLAYER_SPRINT_SPEED);

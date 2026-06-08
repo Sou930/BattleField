@@ -1162,9 +1162,21 @@ export function generateWorld(): World {
   // for the low desert connector roads we lift them by a larger minimum so they
   // clear the worst-case mesh interpolation and always read as sitting on top.
   for (const r of roads) {
-    const isPaved = pavedFlatHeightAt(r.pos.x, r.pos.z) !== null;
-    const minClear = isPaved ? 0.02 : 0.18;
-    r.pos.y = groundAt(r.pos.x, r.pos.z) + Math.max(minClear, r.pos.y);
+    const paved = pavedFlatHeightAt(r.pos.x, r.pos.z);
+    if (paved !== null) {
+      // Inside the dead-level airfield/base footprint the terrain mesh is snapped
+      // to a true flat plane (= `paved`, ≈0). Seat the paved decal directly on
+      // THAT flat plane and KEEP its authored stacking height (surface/shoulder/
+      // paint layers) so the asphalt sits cleanly on top of the ground. Adding
+      // the rolling `groundAt` here was wrong: it lifted the decal onto the
+      // analytic height while the rendered mesh stayed flat, so a tall boundary
+      // triangle could still swallow the strip and the runway looked like sand.
+      r.pos.y = paved + Math.max(0.12, r.pos.y);
+    } else {
+      // Desert connector roads follow the rolling ground. Lift them by a larger
+      // minimum so they clear worst-case mid-cell mesh interpolation bulges.
+      r.pos.y = groundAt(r.pos.x, r.pos.z) + Math.max(0.18, r.pos.y);
+    }
   }
 
   // === Aircraft runway spawn points =====================================
