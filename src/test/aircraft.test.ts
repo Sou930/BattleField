@@ -240,12 +240,53 @@ describe("player aircraft piloting", () => {
     expect(engine.state.playerInAircraft).toBe(ac.id);
 
     const bombsBefore = ac.bombCount;
+    // Put the aircraft genuinely airborne. `onGround` must be cleared too,
+    // otherwise the flight controller snaps it back to runway height — which
+    // would make the just-released bomb detonate against the ground on the very
+    // first frame (bombs now correctly explode on terrain/building contact).
+    ac.onGround = false;
     ac.pos.y = 120; // airborne so the bomb has room to fall
     input.keys.add("Space");
     engine.update(0.05, 6);
 
     expect(ac.bombCount).toBe(bombsBefore - 1);
     expect(engine.state.aircraftBombs.length).toBeGreaterThan(0);
+  });
+
+  it("a dropped bomb detonates when it strikes a building (not just the ground)", () => {
+    const { engine, input } = makeControllableEngine();
+    engine.startMatch();
+    engine.state.status = "playing";
+    const ac = engine.state.aircraft.find((a) => a.kind === "attacker")!;
+    engine.state.player.pos.copy(ac.pos);
+    engine.state.player.pos.y = 1.65;
+    input.aircraftEnterPressed = true;
+    engine.update(0.016, 1);
+
+    // Find a tall wall/building collider and hover the plane right above it.
+    const tall = engine.boxes.find(
+      (b) => b.max.y - b.min.y > 3 && b.max.y > 4,
+    )!;
+    expect(tall).toBeTruthy();
+    const cx = (tall.min.x + tall.max.x) / 2;
+    const cz = (tall.min.z + tall.max.z) / 2;
+    ac.onGround = false;
+    ac.pos.set(cx, tall.max.y + 30, cz);
+    ac.vel.set(0, -40, 0); // dive straight down onto the roof
+
+    const explBefore = engine.state.explosions.length;
+    input.keys.add("Space");
+    // Advance enough frames for the bomb to fall the ~30m onto the roof.
+    for (let i = 0; i < 40 && engine.state.explosions.length === explBefore; i++) {
+      engine.update(0.05, 6 + i * 0.05);
+      input.keys.delete("Space"); // only drop once
+    }
+
+    // It should have exploded ABOVE ground level (on the roof of the building),
+    // proving bombs now collide with structures rather than phasing through.
+    expect(engine.state.explosions.length).toBeGreaterThan(explBefore);
+    const blast = engine.state.explosions[engine.state.explosions.length - 1];
+    expect(blast.pos.y).toBeGreaterThan(tall.max.y - 1);
   });
 });
 

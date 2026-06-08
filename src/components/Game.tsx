@@ -2798,13 +2798,19 @@ function buildAttackerMesh(g: THREE.Group) {
   windscreen.rotation.x = 0.3;
   g.add(windscreen);
 
-  // --- Belly bomb-rack pylons + six detailed bombs ---
-  for (let i = 0; i < 6; i++) {
-    const x = (i % 2 === 0 ? -1 : 1) * 0.8;
-    const z = -1.2 + Math.floor(i / 2) * 1.1;
-    // Pylon stub.
-    const rack = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.28, 0.5), dark);
-    rack.position.set(x, -0.55, z);
+  // --- Under-wing bomb-rack pylons + four detailed bombs ---
+  // Four bombs (matching the sim's bombMax) are mounted in pairs under each
+  // wing. Each bomb group is tagged with `bombSlot` so AircraftScene can hide
+  // them one-by-one as `bombCount` drops — giving the visual of ordnance
+  // releasing from the wings when the pilot bombs.
+  for (let i = 0; i < 4; i++) {
+    const side = i < 2 ? -1 : 1;           // left wing first, then right
+    const inner = i % 2 === 0;             // inner vs outer station
+    const x = side * (inner ? 1.4 : 2.3);  // mount points under the wing span
+    const z = 0.1;                         // roughly under the wing root chord
+    // Pylon stub joining the bomb to the underside of the wing.
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.3, 0.5), dark);
+    rack.position.set(x, -0.32, z);
     g.add(rack);
     // Bomb (body + nose cone + tail fins).
     const bomb = new THREE.Group();
@@ -2822,7 +2828,9 @@ function buildAttackerMesh(g: THREE.Group) {
       fin.translateY(0.11);
       bomb.add(fin);
     }
-    bomb.position.set(x, -0.82, z);
+    bomb.position.set(x, -0.58, z);
+    // Tag so the live renderer can toggle visibility per remaining bomb.
+    bomb.userData.bombSlot = i;
     g.add(bomb);
   }
 }
@@ -2885,6 +2893,13 @@ function AircraftScene() {
           c.visible = lit;
           const grow = 0.6 + v.throttle * 0.8;
           c.scale.set(flicker, flicker * grow, flicker);
+        }
+        // Under-wing bombs: hide the highest-index slots first as ordnance is
+        // dropped, so the model visibly empties its racks. Bombs are released
+        // from slot (bombCount) upward (e.g. with 2 left, slots 0 & 1 show).
+        const slot = (c.userData as { bombSlot?: number }).bombSlot;
+        if (slot !== undefined) {
+          c.visible = v.alive && slot < v.bombCount;
         }
       }
     }
@@ -3154,12 +3169,53 @@ export default function Game() {
   };
 
   const status = useGameHook((s) => s.status);
+  const mapOpen = useGameHook((s) => s.mapOpen);
   const showCanvas = status !== "menu" && status !== "loadout";
+
+  // === Pointer-lock recovery =============================================
+  // The browser releases pointer lock whenever the user presses ESC or when we
+  // explicitly release it (opening the full-screen map, dying, ...). Once it is
+  // lost there was previously no way to get it back, so mouse-look silently
+  // stopped working and the game felt "stuck". We restore it automatically:
+  //   * When the full map closes while still playing, re-request the lock.
+  //   * A click anywhere on the game surface (while playing and the map is
+  //     closed) re-acquires the lock — the standard FPS "click to resume"
+  //     behaviour. This also covers the case where the user pressed ESC.
+  const isTouchDevice =
+    typeof window !== "undefined" && "ontouchstart" in window;
+
+  useEffect(() => {
+    if (isTouchDevice) return;
+    // Re-acquire the lock the moment the map is dismissed while playing.
+    if (status === "playing" && !mapOpen) {
+      // Defer to the next tick so it runs after the map overlay unmounts and
+      // its own keydown handler (which may have just fired) has settled.
+      const t = window.setTimeout(() => {
+        if (document.pointerLockElement !== containerRef.current) {
+          inputRef.current?.requestLock();
+        }
+      }, 0);
+      return () => window.clearTimeout(t);
+    }
+  }, [status, mapOpen, isTouchDevice]);
 
   return (
     <div
       ref={containerRef}
       className="game-root relative w-screen overflow-hidden bg-background"
+      onPointerDown={() => {
+        // Standard FPS "click to resume": if we're playing, the map is closed
+        // and we don't currently hold pointer lock (e.g. user hit ESC), grab it
+        // again so mouse-look works. No-op on touch devices.
+        if (
+          !isTouchDevice &&
+          status === "playing" &&
+          !mapOpen &&
+          document.pointerLockElement !== containerRef.current
+        ) {
+          inputRef.current?.requestLock();
+        }
+      }}
     >
       <div className="absolute inset-0 z-0">
         {showCanvas && (
