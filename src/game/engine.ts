@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GameState, store } from "./store";
 import type { World } from "./world";
-import { Box, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS, BASE_HALF_Z } from "./world";
+import { Box, BoxGrid, worldToBoxes, rayBox, resolvePlayerCollision, WORLD_SIZE, terrainHeightAt, BASE_POS, BASE_HALF_Z } from "./world";
 import { GRENADE_FUSE, GRENADE_RADIUS, SMOKE_DURATION, SMOKE_RADIUS, WEAPONS, makeWeaponState } from "./weapons";
 import { Soldier, Pickup, WeaponId, Team, DestructibleObject, RagdollPart, SmokeCloud, CapturePoint, Vehicle, SoldierClass, SpawnPoint, Aircraft } from "./types";
 import { CLASSES } from "./classes";
@@ -102,6 +102,8 @@ export class GameEngine {
   state: GameState;
   world: World;
   boxes: Box[];
+  /** Spatial-grid broadphase over `boxes` for fast per-agent collision. */
+  boxGrid: BoxGrid;
   input: {
     keys: Set<string>;
     consumeMouseDelta: () => { dx: number; dy: number };
@@ -138,6 +140,7 @@ export class GameEngine {
     this.input = input;
     this.world = world;
     this.boxes = worldToBoxes(this.world);
+    this.boxGrid = new BoxGrid(this.boxes);
     this.spawnDestructibles();
   }
 
@@ -256,6 +259,7 @@ export class GameEngine {
     // longer block the drivable vehicles that replaced them.
     this.world.parkedVehicles.length = 0;
     this.boxes = worldToBoxes(this.world);
+    this.boxGrid = new BoxGrid(this.boxes);
   }
 
   startMatch() {
@@ -1499,7 +1503,7 @@ export class GameEngine {
       p.vel.y = 0;
       p.onGround = true;
     }
-    resolvePlayerCollision(p.pos, PLAYER_RADIUS, PLAYER_HEIGHT, this.boxes);
+    resolvePlayerCollision(p.pos, PLAYER_RADIUS, PLAYER_HEIGHT, this.boxGrid);
 
     const lim = WORLD_SIZE / 2 - 2;
     p.pos.x = Math.max(-lim, Math.min(lim, p.pos.x));
@@ -2332,13 +2336,18 @@ export class GameEngine {
 
   private isMoveBlocked(pos: THREE.Vector3, dir: THREE.Vector3, distance: number) {
     const ahead = pos.clone().addScaledVector(dir, distance);
-    for (const b of this.boxes) {
+    this.boxGrid.ensureSeen();
+    const near = this.boxGrid.query(ahead.x - 0.7, ahead.x + 0.7, ahead.z - 0.7, ahead.z + 0.7, this._boxScratch);
+    for (const b of near) {
       if (ahead.x > b.min.x - 0.7 && ahead.x < b.max.x + 0.7 &&
           ahead.z > b.min.z - 0.7 && ahead.z < b.max.z + 0.7 &&
           pos.y + 0.5 > b.min.y && pos.y - 0.5 < b.max.y) return true;
     }
     return false;
   }
+
+  /** Scratch buffer reused by per-frame grid queries (avoids allocation). */
+  private _boxScratch: Box[] = [];
 
   // Steering with obstacle avoidance + ally separation
   private steerAndMove(s: Soldier, desired: THREE.Vector3, speed: number, dt: number) {
@@ -2356,7 +2365,9 @@ export class GameEngine {
     const probe = desired.clone().multiplyScalar(2.8);
     const ahead = s.pos.clone().add(probe);
     let blocked = false;
-    for (const b of this.boxes) {
+    this.boxGrid.ensureSeen();
+    const nearAhead = this.boxGrid.query(ahead.x - 0.6, ahead.x + 0.6, ahead.z - 0.6, ahead.z + 0.6, this._boxScratch);
+    for (const b of nearAhead) {
       if (ahead.x > b.min.x - 0.6 && ahead.x < b.max.x + 0.6 &&
           ahead.z > b.min.z - 0.6 && ahead.z < b.max.z + 0.6 &&
           s.pos.y + 0.5 > b.min.y && s.pos.y - 0.5 < b.max.y) {
@@ -2405,7 +2416,7 @@ export class GameEngine {
     newPos.x += s.moveDir.x * speed * dt;
     newPos.z += s.moveDir.z * speed * dt;
     newPos.y = terrainHeightAt(this.world, newPos.x, newPos.z) + SOLDIER_HEIGHT;
-    resolvePlayerCollision(newPos, SOLDIER_RADIUS, SOLDIER_HEIGHT, this.boxes);
+    resolvePlayerCollision(newPos, SOLDIER_RADIUS, SOLDIER_HEIGHT, this.boxGrid);
     // If collision resolution pushed soldier too far, clamp the displacement
     const dx = newPos.x - s.pos.x;
     const dz = newPos.z - s.pos.z;
@@ -2571,7 +2582,14 @@ export class GameEngine {
     _tmpV1.subVectors(to, from);
     const len = _tmpV1.length();
     _tmpV1.normalize();
-    for (const b of this.boxes) {
+    // Only test colliders whose cells the sight-line's XZ bounding box touches.
+    this.boxGrid.ensureSeen();
+    const near = this.boxGrid.query(
+      Math.min(from.x, to.x), Math.max(from.x, to.x),
+      Math.min(from.z, to.z), Math.max(from.z, to.z),
+      this._boxScratch,
+    );
+    for (const b of near) {
       const t = rayBox(from, _tmpV1, b);
       if (t !== null && t < len) return false;
     }
