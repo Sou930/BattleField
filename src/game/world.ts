@@ -122,8 +122,8 @@ function mulberry32(seed: number) {
 // WORLD_SIZE follows automatically, and the absolute footprints are multiplied
 // by MAP_SCALE so the structures stay correctly proportioned to the smaller
 // world rather than overflowing it.
-export const MAP_SCALE = 0.8;
-export const WORLD_SIZE = Math.round(1480 * MAP_SCALE); // 0.8x of the original 1480
+export const MAP_SCALE = 1.05;
+export const WORLD_SIZE = Math.round(1480 * MAP_SCALE); // 1.05x of the original 1480 — a larger battlefield
 
 // X coordinate that divides the airbase (west, x<0) from the ruined city
 // (east, x>0). A blast-wall corridor sits along this seam.
@@ -137,7 +137,7 @@ export const DISTRICT_SEAM_X = -WORLD_SIZE * 0.04;
 export const CITY_CENTER_X = WORLD_SIZE * 0.27;
 export const CITY_CENTER_Z = WORLD_SIZE * 0.02;
 // Larger flattened urban disc so the bigger, denser grid stays buildable.
-const CITY_FLAT_RADIUS = WORLD_SIZE * 0.3 + 22;
+const CITY_FLAT_RADIUS = WORLD_SIZE * 0.34 + 26;
 
 // --- Aleppo Citadel (landmark hill-fortress on the city's NE) ------------
 export const CITADEL_X = WORLD_SIZE * 0.38;
@@ -490,6 +490,69 @@ function makeBuilding(
     }
   }
 
+  // ---- Rooftop clutter: the single biggest "realism" cue for a dense city.
+  // Real flat-roofed Middle-Eastern apartment blocks bristle with black water
+  // tanks, satellite dishes, AC condensers, vent stacks and a stairwell
+  // penthouse. We scatter a handful of small boxes/cylinders on the roof deck
+  // (kept inside the parapet) so the skyline reads as lived-in rather than a
+  // field of clean cuboids.
+  if (floors >= 1) {
+    const roofY = h + 0.3; // top of the roof slab
+    const inset = 0.9;
+    const rx0 = cx - halfW + inset;
+    const rz0 = cz - halfD + inset;
+    const rspanX = Math.max(0.5, w - inset * 2);
+    const rspanZ = Math.max(0.5, d - inset * 2);
+    // Stairwell penthouse hut over the staircase corner on taller blocks.
+    if (floors >= 3) {
+      const hutW = Math.min(2.6, w * 0.4);
+      const hutD = Math.min(2.6, d * 0.4);
+      const hutH = 1.8;
+      walls.push({
+        pos: new THREE.Vector3(cx - halfW + hutW / 2 + 0.6, roofY + hutH / 2, cz - halfD + hutD / 2 + 0.6),
+        size: new THREE.Vector3(hutW, hutH, hutD),
+        color: roofColor,
+        kind: "barrier",
+        decorative: true,
+      });
+    }
+    // Black water tanks (the iconic rooftop drums). 1–3 per block.
+    const tankN = 1 + Math.floor(rng() * 3);
+    for (let t = 0; t < tankN; t++) {
+      const tw = 0.7 + rng() * 0.5;
+      const th = 0.8 + rng() * 0.5;
+      walls.push({
+        pos: new THREE.Vector3(rx0 + rng() * rspanX, roofY + th / 2, rz0 + rng() * rspanZ),
+        size: new THREE.Vector3(tw, th, tw),
+        color: rng() < 0.6 ? "#2a2a2a" : "#37506a",
+        kind: "barrier",
+        decorative: true,
+      });
+    }
+    // AC condenser / utility boxes.
+    const acN = Math.floor(rng() * 3);
+    for (let a = 0; a < acN; a++) {
+      walls.push({
+        pos: new THREE.Vector3(rx0 + rng() * rspanX, roofY + 0.35, rz0 + rng() * rspanZ),
+        size: new THREE.Vector3(0.7, 0.6, 0.55),
+        color: "#9a9488",
+        kind: "barrier",
+        decorative: true,
+      });
+    }
+    // A thin vent / antenna stack on some roofs.
+    if (rng() < 0.5) {
+      const stackH = 1.2 + rng() * 1.6;
+      walls.push({
+        pos: new THREE.Vector3(rx0 + rng() * rspanX, roofY + stackH / 2, rz0 + rng() * rspanZ),
+        size: new THREE.Vector3(0.18, stackH, 0.18),
+        color: "#5a5249",
+        kind: "barrier",
+        decorative: true,
+      });
+    }
+  }
+
   const b: Building = {
     walls,
     min: new THREE.Vector3(cx - halfW, 0, cz - halfD),
@@ -624,12 +687,13 @@ export function generateWorld(): World {
   // EXPANDED urban footprint: the city grid now covers a much larger square so
   // the dense quarter fills the eastern/southern half freed up by fusing the
   // two bases into one west-side facility.
-  const citySize = WORLD_SIZE * 0.6;
+  const citySize = WORLD_SIZE * 0.66;
   const cityRadius = CITY_FLAT_RADIUS - 8;
   // Denser grid: more, smaller blocks separated by narrow alleys, like a real
   // medieval old-city quarter. The cell count is grown along with the footprint
-  // so the blocks stay the same size (just more of them) → a bigger city.
-  const cells = 26;
+  // so the blocks stay roughly the same size (just many more of them) → a much
+  // bigger, finer-grained city than before.
+  const cells = 40;
   const cellSize = citySize / cells;
   const plazaX = cityCX;
   const plazaZ = cityCZ;
@@ -676,13 +740,26 @@ export function generateWorld(): World {
           buildings.push(b);
         }
       } else {
-        const w = Math.min(maxW, 8 + rng() * (maxW - 8));
-        const d = Math.min(maxD, 8 + rng() * (maxD - 8));
-        // More tall towers (~30%) for a denser, taller skyline.
-        const tower = rng() < 0.3;
-        const h = tower
-          ? STOREY_HEIGHT * (3.5 + rng() * 2.5)
-          : STOREY_HEIGHT * (1 + rng() * 2.6);
+        const w = Math.min(maxW, 6 + rng() * (maxW - 6));
+        const d = Math.min(maxD, 6 + rng() * (maxD - 6));
+        // Graded skyline: a mix of low courtyard houses, mid-rise blocks and
+        // the occasional tall tower / landmark so the dense quarter has real
+        // vertical variety rather than one uniform height.
+        const roll = rng();
+        let h: number;
+        if (roll < 0.06) {
+          // Rare landmark high-rise (mosque-tower / office block).
+          h = STOREY_HEIGHT * (6 + rng() * 3);
+        } else if (roll < 0.34) {
+          // Tall tower.
+          h = STOREY_HEIGHT * (3.5 + rng() * 2.5);
+        } else if (roll < 0.7) {
+          // Mid-rise apartment block.
+          h = STOREY_HEIGHT * (2 + rng() * 1.8);
+        } else {
+          // Low house / shop.
+          h = STOREY_HEIGHT * (1 + rng() * 1.4);
+        }
         const b = makeBuilding(rng, cx0 + (rng() - 0.5) * 1.5, cz0 + (rng() - 0.5) * 1.5, w, d, h);
         buildings.push(b);
         // War damage: pile rubble crates against ~55% of buildings.
@@ -755,7 +832,7 @@ export function generateWorld(): World {
 
   // Wooden crates as cover, concentrated in the city, sparse in the desert.
   // (Count raised to populate the enlarged urban footprint.)
-  for (let i = 0; i < 460; i++) {
+  for (let i = 0; i < 720; i++) {
     const s = 0.9 + rng() * 0.7;
     const inCity = rng() > 0.3;
     let px: number, pz: number;
@@ -773,7 +850,7 @@ export function generateWorld(): World {
   }
 
   // Oil barrels scattered everywhere (more around the city / airfield).
-  for (let i = 0; i < 110; i++) {
+  for (let i = 0; i < 170; i++) {
     const p = new THREE.Vector3(
       (rng() - 0.5) * (WORLD_SIZE - 30),
       0,
@@ -806,7 +883,7 @@ export function generateWorld(): World {
 
   // Trees: a few palms/poplars in city courtyards, scrub in the desert.
   // (Count raised for the enlarged city.)
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 460; i++) {
     const inCity = rng() > 0.5;
     const px = inCity ? cityCX + (rng() - 0.5) * citySize : (rng() - 0.5) * (WORLD_SIZE - 30);
     const pz = inCity ? cityCZ + (rng() - 0.5) * citySize : (rng() - 0.5) * (WORLD_SIZE - 30);
@@ -819,7 +896,7 @@ export function generateWorld(): World {
 
   // Sandbag clusters / checkpoints, concentrated along the district seam and
   // around the city — the front line of the fused battlefield.
-  for (let i = 0; i < 140; i++) {
+  for (let i = 0; i < 210; i++) {
     const onSeam = rng() < 0.4;
     let cx: number, cz: number;
     if (onSeam) {
@@ -885,7 +962,7 @@ export function generateWorld(): World {
 
   // Street lamps along the city's main roads (reaching out across the enlarged
   // grid so the whole expanded quarter is lit).
-  const lampReach = Math.min(halfCells, 11);
+  const lampReach = Math.min(halfCells, 17);
   for (let i = -lampReach; i <= lampReach; i++) {
     if (i === 0) continue;
     lamps.push({ pos: new THREE.Vector3(cityCX + i * cellSize, 0, cityCZ + 4) });
@@ -2516,16 +2593,124 @@ export function worldToBoxes(world: World): Box[] {
   return boxes;
 }
 
-// Resolve player capsule (approx as cylinder) vs boxes
+// ---------------------------------------------------------------------------
+// Static-collider spatial grid (broadphase).
+//
+// With the enlarged, denser city the static `boxes` array holds thousands of
+// colliders. Scanning all of them for every soldier and the player every frame
+// is O(boxes × agents) and dominated the per-frame cost. A uniform XZ grid
+// buckets each box into the cells it overlaps so a collision/region query only
+// has to test the handful of boxes near the agent — turning the hot path into
+// roughly O(local). The grid is built once when the world's boxes are created
+// and rebuilt only when the collider set changes (e.g. a vehicle is removed).
+// ---------------------------------------------------------------------------
+const GRID_CELL = 16; // metres per cell — comfortably larger than most colliders
+
+export class BoxGrid {
+  readonly boxes: Box[];
+  private cell: number;
+  private minX: number;
+  private minZ: number;
+  private cols: number;
+  private rows: number;
+  private buckets: number[][];
+
+  constructor(boxes: Box[], cell = GRID_CELL) {
+    this.boxes = boxes;
+    this.cell = cell;
+    // World extent (a touch of padding so edge colliders still bucket cleanly).
+    const half = WORLD_SIZE / 2 + GRID_CELL;
+    this.minX = -half;
+    this.minZ = -half;
+    this.cols = Math.max(1, Math.ceil((half * 2) / cell));
+    this.rows = this.cols;
+    this.buckets = new Array(this.cols * this.rows);
+    for (let i = 0; i < this.buckets.length; i++) this.buckets[i] = [];
+    for (let bi = 0; bi < boxes.length; bi++) this.insert(bi, boxes[bi]);
+  }
+
+  private clampCol(c: number) {
+    return c < 0 ? 0 : c >= this.cols ? this.cols - 1 : c;
+  }
+  private clampRow(r: number) {
+    return r < 0 ? 0 : r >= this.rows ? this.rows - 1 : r;
+  }
+
+  private insert(index: number, b: Box) {
+    const c0 = this.clampCol(Math.floor((b.min.x - this.minX) / this.cell));
+    const c1 = this.clampCol(Math.floor((b.max.x - this.minX) / this.cell));
+    const r0 = this.clampRow(Math.floor((b.min.z - this.minZ) / this.cell));
+    const r1 = this.clampRow(Math.floor((b.max.z - this.minZ) / this.cell));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        this.buckets[r * this.cols + c].push(index);
+      }
+    }
+  }
+
+  // Collect candidate boxes whose cells overlap the XZ region [minX,maxX]×
+  // [minZ,maxZ]. `out` is reused across calls to avoid per-frame allocation.
+  query(minX: number, maxX: number, minZ: number, maxZ: number, out: Box[]): Box[] {
+    out.length = 0;
+    const c0 = this.clampCol(Math.floor((minX - this.minX) / this.cell));
+    const c1 = this.clampCol(Math.floor((maxX - this.minX) / this.cell));
+    const r0 = this.clampRow(Math.floor((minZ - this.minZ) / this.cell));
+    const r1 = this.clampRow(Math.floor((maxZ - this.minZ) / this.cell));
+    // De-dup boxes that span multiple queried cells with a tiny tag set.
+    const seen = this._seen;
+    const stamp = ++this._stamp;
+    for (let r = r0; r <= r1; r++) {
+      const base = r * this.cols;
+      for (let c = c0; c <= c1; c++) {
+        const bucket = this.buckets[base + c];
+        for (let k = 0; k < bucket.length; k++) {
+          const idx = bucket[k];
+          if (seen[idx] === stamp) continue;
+          seen[idx] = stamp;
+          out.push(this.boxes[idx]);
+        }
+      }
+    }
+    return out;
+  }
+
+  private _seen: number[] = [];
+  private _stamp = 0;
+  ensureSeen() {
+    if (this._seen.length < this.boxes.length) {
+      this._seen = new Array(this.boxes.length).fill(0);
+      this._stamp = 0;
+    }
+  }
+}
+
+// Scratch buffer reused by resolvePlayerCollision so grid queries allocate
+// nothing on the hot path.
+const _collideScratch: Box[] = [];
+
+// Resolve player capsule (approx as cylinder) vs boxes. Accepts either a raw
+// Box[] (legacy / tests) or a BoxGrid; with the grid only nearby colliders are
+// tested, making the per-agent cost independent of total city size.
 export function resolvePlayerCollision(
   pos: THREE.Vector3,
   radius: number,
   height: number,
-  boxes: Box[],
+  boxes: Box[] | BoxGrid,
 ) {
   const yFeet = pos.y - height;
   const yHead = pos.y;
-  for (const b of boxes) {
+  let candidates: Box[];
+  if (boxes instanceof BoxGrid) {
+    boxes.ensureSeen();
+    candidates = boxes.query(
+      pos.x - radius, pos.x + radius,
+      pos.z - radius, pos.z + radius,
+      _collideScratch,
+    );
+  } else {
+    candidates = boxes;
+  }
+  for (const b of candidates) {
     if (yHead < b.min.y || yFeet > b.max.y) continue;
     const cx = Math.max(b.min.x, Math.min(pos.x, b.max.x));
     const cz = Math.max(b.min.z, Math.min(pos.z, b.max.z));
