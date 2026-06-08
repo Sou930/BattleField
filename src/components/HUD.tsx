@@ -284,9 +284,8 @@ export default function HUD({ onStart, onStartGame, input }: Props) {
           <div className="mt-2 text-gray-400 text-[10px] leading-4">
             {isMobile ? (
               <>
-                左スティック 旋回補助<br />
-                右ドラッグ 機首操作<br />
-                THR± スロットル<br />
+                右スティック 機首操作(ピッチ/ロール)<br />
+                左スライダー スロットル<br />
                 BRAKE エアブレーキ<br />
                 GEAR 脚 出し入れ<br />
                 FIRE 機関銃<br />
@@ -510,18 +509,26 @@ function MobileControls({
 }) {
   return (
     <>
-      {/* Movement joystick (left) - works for both on-foot and vehicle */}
-      <Joystick
-        side="left"
-        onChange={(v) => input.current?.setTouchMove(v)}
-        onRelease={() => input.current?.setTouchMove({ x: 0, y: 0 })}
-      />
+      {/* Movement joystick (left) - on-foot and ground vehicles only.
+          While piloting an aircraft we replace the whole control scheme with a
+          War-Thunder-Mobile-style flight stick + throttle slider below. */}
+      {!inAircraft && (
+        <Joystick
+          side="left"
+          onChange={(v) => input.current?.setTouchMove(v)}
+          onRelease={() => input.current?.setTouchMove({ x: 0, y: 0 })}
+        />
+      )}
       {/* Look area (right half of screen).
           NOTE: must be rendered BEFORE the action buttons so the buttons
           stack on top of it and reliably receive taps. Previously the LookPad
           was rendered last and covered the aircraft ENTER button, making it
-          unpressable on mobile. */}
-      <LookPad onDelta={(dx, dy) => input.current?.addTouchLook(dx, dy)} />
+          unpressable on mobile.
+          Disabled in the air: the flight stick handles attitude directly so a
+          free-look pad would fight the camera. */}
+      {!inAircraft && (
+        <LookPad onDelta={(dx, dy) => input.current?.addTouchLook(dx, dy)} />
+      )}
 
       {/* Aircraft enter/exit button (徒歩で機体が近い時、または搭乗中).
           搭乗中は脚を出して着陸しないと判定が出にくいので機体側で処理。
@@ -675,47 +682,40 @@ function MobileControls({
   );
 }
 
-// ===== AIRCRAFT FLIGHT CONTROLS (mobile) =====
-// 搭乗中だけ表示する操縦パネル。スロットル(+/-)・エアブレーキ(ホールド)・
-// ランディングギア(トグル)・機銃(ホールド)・爆弾(attacker のみ)。
-// 視点(LookPad)はそのままピッチ/ロール操縦に使われる。
+// ===== AIRCRAFT FLIGHT CONTROLS (mobile, War Thunder Mobile style) =====
+// 搭乗中だけ表示する操縦パネル。
+//  ・左: 縦スロットルスライダー (0〜100%, ドラッグで連続調整)。
+//  ・右: 大型の飛行スティック (上下=ピッチ / 左右=ロール)。指を離すと中立へ。
+//  ・FIRE / BRAKE / GEAR / BOMB は上部に集約。
+// 視点パッドは無効化され、機体は常にスティックの倒し量で直接操縦する。
 function AircraftControls({ input }: { input: MutableRefObject<Input | null> }) {
   const aircraft = useGame((s) => s.aircraft);
   const acId = useGame((s) => s.playerInAircraft);
   const ac = acId ? aircraft.find((a) => a.id === acId) : null;
 
-  const setKey = (code: string, on: boolean) => {
-    const inp = input.current;
-    if (!inp) return;
-    if (on) inp.keys.add(code);
-    else inp.keys.delete(code);
-  };
-
   return (
     <>
-      {/* Throttle controls (left, above the joystick) */}
-      <div className="pointer-events-none absolute bottom-60 left-6 z-20 flex flex-col gap-2">
-        <HoldButton
-          label="THR +"
-          color="hsl(var(--health))"
-          onHold={(on) => setKey("KeyW", on)}
-        />
-        <HoldButton
-          label="THR −"
-          color="hsl(var(--ammo))"
-          onHold={(on) => setKey("KeyS", on)}
-        />
-      </div>
+      {/* === 縦スロットルスライダー (左) === */}
+      <ThrottleSlider
+        value={ac?.throttle ?? 0}
+        onChange={(t) => input.current?.setFlightThrottle(t)}
+      />
 
-      {/* Right cluster: FIRE + AIR BRAKE + GEAR + BOMB */}
-      <div className="pointer-events-none absolute bottom-32 right-4 z-20 flex flex-col items-end gap-3">
+      {/* === 飛行スティック (右下) === */}
+      <FlightStick
+        onChange={(v) => input.current?.setFlightStick(v)}
+        onRelease={() => input.current?.releaseFlightStick()}
+      />
+
+      {/* === Action cluster (右上寄り): FIRE + BRAKE + GEAR + BOMB === */}
+      <div className="pointer-events-none absolute right-4 top-1/2 z-30 flex -translate-y-1/2 flex-col items-end gap-3">
         <HoldButton
           label="FIRE"
           color="hsl(var(--danger))"
           big
           onHold={(on) => input.current?.setFire(on)}
         />
-        <div className="flex items-end gap-2">
+        <div className="flex items-center gap-2">
           {/* AIR BRAKE: hold to deploy */}
           <HoldButton
             label="BRAKE"
@@ -762,6 +762,172 @@ function AircraftControls({ input }: { input: MutableRefObject<Input | null> }) 
         )}
       </div>
     </>
+  );
+}
+
+// 縦スロットルスライダー (War Thunder Mobile 風)。画面左に縦長のトラックを置き、
+// 上にドラッグするほど出力が上がる。タップした高さへ即座にジャンプし、その後は
+// 指の移動に追従する。0〜1 の値を onChange で報告する。
+function ThrottleSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (t: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const touchId = useRef<number | null>(null);
+
+  const updateFromY = (clientY: number) => {
+    const el = trackRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // 上端 = 1.0, 下端 = 0.0。
+    const t = 1 - (clientY - r.top) / r.height;
+    onChange(Math.max(0, Math.min(1, t)));
+  };
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.changedTouches[0];
+    touchId.current = t.identifier;
+    updateFromY(t.clientY);
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === touchId.current) {
+        updateFromY(t.clientY);
+        e.preventDefault();
+      }
+    }
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === touchId.current) {
+        touchId.current = null;
+      }
+    }
+  };
+
+  const pct = Math.round(value * 100);
+  return (
+    <div className="pointer-events-none absolute bottom-24 left-5 z-30 flex flex-col items-center gap-1">
+      <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-200 drop-shadow">
+        THR {pct}%
+      </div>
+      <div
+        ref={trackRef}
+        className="pointer-events-auto relative h-48 w-14 overflow-hidden rounded-full border-2 border-white/30 bg-slate-900/60 backdrop-blur-sm"
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchEnd}
+      >
+        {/* Fill from the bottom up. */}
+        <div
+          className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-emerald-600/90 to-emerald-400/80"
+          style={{ height: `${pct}%` }}
+        />
+        {/* Knob marker. */}
+        <div
+          className="absolute left-1/2 h-6 w-12 -translate-x-1/2 rounded-md border-2 border-white/70 bg-white/30 shadow"
+          style={{ bottom: `calc(${pct}% - 12px)` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// 大型の飛行スティック (固定ベース)。ベース内をドラッグするとノブが追従し、
+// 中心からのオフセットを正規化した {x,y} (-1..1) を onChange で報告する。
+// y は画面下方向が正 (＝機首下げ)。指を離すと中立(0,0)へ。
+function FlightStick({
+  onChange,
+  onRelease,
+}: {
+  onChange: (v: { x: number; y: number }) => void;
+  onRelease: () => void;
+}) {
+  const baseRef = useRef<HTMLDivElement>(null);
+  const [knob, setKnob] = useState({ x: 0, y: 0 });
+  const [active, setActive] = useState(false);
+  const touchId = useRef<number | null>(null);
+  const baseRadius = 80;
+
+  const update = (cx: number, cy: number) => {
+    const base = baseRef.current;
+    if (!base) return;
+    const r = base.getBoundingClientRect();
+    const ox = r.left + r.width / 2;
+    const oy = r.top + r.height / 2;
+    let dx = cx - ox;
+    let dy = cy - oy;
+    const dist = Math.hypot(dx, dy);
+    if (dist > baseRadius) {
+      dx = (dx / dist) * baseRadius;
+      dy = (dy / dist) * baseRadius;
+    }
+    setKnob({ x: dx, y: dy });
+    onChange({ x: dx / baseRadius, y: dy / baseRadius });
+  };
+
+  const handleStart = (e: React.TouchEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.changedTouches[0];
+    touchId.current = t.identifier;
+    setActive(true);
+    update(t.clientX, t.clientY);
+  };
+  const handleMove = (e: React.TouchEvent) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t = e.changedTouches[i];
+      if (t.identifier === touchId.current) {
+        update(t.clientX, t.clientY);
+        e.preventDefault();
+      }
+    }
+  };
+  const handleEnd = (e: React.TouchEvent) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === touchId.current) {
+        touchId.current = null;
+        setActive(false);
+        setKnob({ x: 0, y: 0 });
+        onRelease();
+      }
+    }
+  };
+
+  return (
+    <div className="pointer-events-none absolute bottom-10 right-1/2 z-20 translate-x-1/2 sm:right-44 sm:translate-x-0">
+      <div
+        ref={baseRef}
+        className={cn(
+          "pointer-events-auto relative flex items-center justify-center rounded-full border-2 backdrop-blur-sm",
+          active ? "border-sky-300/80 bg-sky-900/40" : "border-white/25 bg-slate-900/40",
+        )}
+        style={{ width: baseRadius * 2, height: baseRadius * 2 }}
+        onTouchStart={handleStart}
+        onTouchMove={handleMove}
+        onTouchEnd={handleEnd}
+        onTouchCancel={handleEnd}
+      >
+        {/* Cross-hair guides */}
+        <div className="absolute h-full w-px bg-white/15" />
+        <div className="absolute h-px w-full bg-white/15" />
+        {/* Knob */}
+        <div
+          className="absolute h-16 w-16 rounded-full border-2 border-white/70 bg-sky-400/40 shadow-lg"
+          style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
+        />
+        <span className="pointer-events-none absolute -top-6 text-[10px] font-bold uppercase tracking-widest text-sky-200/80">
+          PITCH / ROLL
+        </span>
+      </div>
+    </div>
   );
 }
 
