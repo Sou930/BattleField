@@ -1404,19 +1404,26 @@ function Rugs() {
 
 function Pickups() {
   const ref = useRef<THREE.Group>(null);
+  const meshMap = useRef(new Map<number, THREE.Group>());
+  const lastCount = useRef(-1);
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    const list = store.state.pickups.filter((p) => !p.taken);
-    const ids = new Set(list.map((p) => p.id));
-    for (let i = g.children.length - 1; i >= 0; i--) {
-      const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
-    }
-    for (const pk of list) {
-      let m = g.children.find((c: any) => c.userData.id === pk.id) as THREE.Group | undefined;
-      if (!m) {
-        m = new THREE.Group();
+    const pickups = store.state.pickups;
+    const map = meshMap.current;
+
+    // Count untaken pickups in one pass; only reconcile children when it changes.
+    let liveCount = 0;
+    for (let i = 0; i < pickups.length; i++) if (!pickups[i].taken) liveCount++;
+
+    if (liveCount !== lastCount.current) {
+      lastCount.current = liveCount;
+      const liveIds = new Set<number>();
+      for (const pk of pickups) {
+        if (pk.taken) continue;
+        liveIds.add(pk.id);
+        if (map.has(pk.id)) continue;
+        const m = new THREE.Group();
         m.userData.id = pk.id;
         let color = "#ffd56b";
         let geo: THREE.BufferGeometry;
@@ -1440,9 +1447,28 @@ function Pickups() {
         mesh.castShadow = true;
         m.add(mesh);
         g.add(m);
+        map.set(pk.id, m);
       }
-      m.position.set(pk.pos.x, pk.pos.y + Math.sin(performance.now() / 500 + pk.id) * 0.1, pk.pos.z);
-      m.rotation.y = performance.now() / 1000;
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Group;
+        const id = (c.userData as any).id;
+        if (!liveIds.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
+      }
+    }
+
+    // Animate bob + spin (shared time bases computed once per frame).
+    const now = performance.now();
+    const bobT = now / 500;
+    const spin = now / 1000;
+    for (const pk of pickups) {
+      if (pk.taken) continue;
+      const m = map.get(pk.id);
+      if (!m) continue;
+      m.position.set(pk.pos.x, pk.pos.y + Math.sin(bobT + pk.id) * 0.1, pk.pos.z);
+      m.rotation.y = spin;
     }
   });
   return <group ref={ref} />;
@@ -1451,20 +1477,39 @@ function Pickups() {
 // Soldiers (both teams)
 function Soldiers() {
   const ref = useRef<THREE.Group>(null);
+  // Persistent id -> mesh map so per-frame lookups are O(1) instead of the
+  // previous O(n) `children.find()` (which made the whole loop O(n²)).
+  const meshMap = useRef(new Map<number, THREE.Group>());
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    const ids = new Set(store.state.soldiers.map((e) => e.id));
-    for (let i = g.children.length - 1; i >= 0; i--) {
-      const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
+    const soldiers = store.state.soldiers;
+    const map = meshMap.current;
+
+    // --- Reap meshes whose soldier no longer exists. ---
+    // Build the live-id set only when the child count and soldier count differ
+    // (i.e. something was added/removed) — on the common steady-state frame we
+    // skip the Set allocation entirely.
+    if (g.children.length !== soldiers.length) {
+      const ids = new Set<number>();
+      for (let i = 0; i < soldiers.length; i++) ids.add(soldiers[i].id);
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Group;
+        const id = (c.userData as any).id;
+        if (!ids.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
+      }
     }
-    for (const e of store.state.soldiers) {
-      let mesh = g.children.find((c: any) => c.userData.id === e.id) as THREE.Group | undefined;
+
+    for (const e of soldiers) {
+      let mesh = map.get(e.id);
       if (!mesh) {
         mesh = buildSoldierMesh(e.team);
         mesh.userData.id = e.id;
         g.add(mesh);
+        map.set(e.id, mesh);
       }
 
       // ---- Locomotion animation ----
@@ -1479,28 +1524,23 @@ function Soldiers() {
         const moving = spd > 0.06;
         // Leg swing amplitude grows with speed (bigger strides when running).
         const legAmp = moving ? Math.min(0.95, 0.35 + spd * 0.5) : 0;
-        const swing = Math.sin(phase) * legAmp;
+        const sinPhase = Math.sin(phase);
+        const swing = sinPhase * legAmp;
         anim.legL.rotation.x = swing;
         anim.legR.rotation.x = -swing;
         // Subtle arm counter-swing so the upper body reads as running, not gliding.
         const armAmp = moving ? Math.min(0.35, 0.08 + spd * 0.16) : 0;
-        anim.armL.rotation.x = anim.armLBaseX - Math.sin(phase) * armAmp;
-        anim.armR.rotation.x = anim.armRBaseX + Math.sin(phase) * armAmp;
+        anim.armL.rotation.x = anim.armLBaseX - sinPhase * armAmp;
+        anim.armR.rotation.x = anim.armRBaseX + sinPhase * armAmp;
         // Vertical bob (twice the stride frequency since |sin| has half period).
-        bob = moving ? Math.abs(Math.sin(phase)) * Math.min(0.12, 0.04 + spd * 0.06) : 0;
-        anim.torso.position.y = anim.torsoBaseY;
+        bob = moving ? Math.abs(sinPhase) * Math.min(0.12, 0.04 + spd * 0.06) : 0;
       }
 
       mesh.position.set(e.pos.x, e.pos.y - 0.9 + bob, e.pos.z);
       mesh.rotation.y = e.yaw;
-      mesh.renderOrder = 0;
-      mesh.traverse((o: any) => {
-        if (o.material && o.material.transparent) {
-          o.material.transparent = false;
-          o.material.depthWrite = true;
-          o.material.opacity = 1;
-        }
-      });
+      // NOTE: materials are created opaque in buildSoldierMesh, so the previous
+      // per-frame `mesh.traverse()` that forced transparent=false on every
+      // sub-mesh was pure overhead — removed.
     }
   });
   return <group ref={ref} />;
@@ -1737,16 +1777,27 @@ function buildSoldierMesh(team: "blue" | "red") {
 
 function Grenades() {
   const ref = useRef<THREE.Group>(null);
+  const meshMap = useRef(new Map<number, THREE.Mesh>());
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    const ids = new Set(store.state.grenades.map((x) => x.id));
-    for (let i = g.children.length - 1; i >= 0; i--) {
-      const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
+    const grenades = store.state.grenades;
+    const map = meshMap.current;
+    if (g.children.length !== grenades.length) {
+      const ids = new Set<number>();
+      for (let i = 0; i < grenades.length; i++) ids.add(grenades[i].id);
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Mesh;
+        const id = (c.userData as any).id;
+        if (!ids.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
+      }
     }
-    for (const gr of store.state.grenades) {
-      let m = g.children.find((c: any) => c.userData.id === gr.id) as THREE.Mesh | undefined;
+    const flicker = Math.sin(performance.now() / 60) * 0.5 + 0.5;
+    for (const gr of grenades) {
+      let m = map.get(gr.id);
       if (!m) {
         m = new THREE.Mesh(
           new THREE.SphereGeometry(0.18, 10, 10),
@@ -1755,9 +1806,10 @@ function Grenades() {
         m.castShadow = true;
         m.userData.id = gr.id;
         g.add(m);
+        map.set(gr.id, m);
       }
       m.position.copy(gr.pos);
-      const intensity = gr.fuse < 1 ? Math.sin(performance.now() / 60) * 0.5 + 0.5 : 0;
+      const intensity = gr.fuse < 1 ? flicker : 0;
       // Reuse the material's existing Color instead of allocating a new one
       // every frame for every live grenade.
       (m.material as THREE.MeshStandardMaterial).emissive.setRGB(
@@ -1901,14 +1953,29 @@ function SmokeCloudsScene() {
 // === DESTRUCTIBLES ===
 function DestructiblesScene() {
   const ref = useRef<THREE.Group>(null);
+  const meshMap = useRef(new Map<number, THREE.Mesh>());
+  // Count of live (non-destroyed) destructibles last frame, so we only rebuild
+  // when something is actually destroyed instead of filtering every frame.
+  const lastLiveCount = useRef(-1);
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    const dList = store.state.destructibles.filter(d => !d.destroyed);
-    // Rebuild if count changed
-    if (g.children.length !== dList.length) {
-      while (g.children.length > 0) removeAndDispose(g, g.children[0]);
-      for (const d of dList) {
+    const all = store.state.destructibles;
+    const map = meshMap.current;
+
+    // Count live ones in a single pass (cheaper than allocating a filtered array).
+    let liveCount = 0;
+    for (let i = 0; i < all.length; i++) if (!all[i].destroyed) liveCount++;
+
+    // Rebuild only when the set of live destructibles changed.
+    if (liveCount !== lastLiveCount.current) {
+      lastLiveCount.current = liveCount;
+      // Track which ids should remain.
+      const liveIds = new Set<number>();
+      for (const d of all) {
+        if (d.destroyed) continue;
+        liveIds.add(d.id);
+        if (map.has(d.id)) continue;
         let geo: THREE.BufferGeometry;
         if (d.kind === "barrel") {
           geo = new THREE.CylinderGeometry(d.size.x / 2, d.size.x / 2, d.size.y, 12);
@@ -1927,17 +1994,28 @@ function DestructiblesScene() {
         mesh.castShadow = true;
         mesh.userData.id = d.id;
         g.add(mesh);
+        map.set(d.id, mesh);
+      }
+      // Remove meshes for destroyed/removed destructibles.
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Mesh;
+        const id = (c.userData as any).id;
+        if (!liveIds.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
       }
     }
-    // Update HP visual
-    for (const child of g.children) {
-      const d = dList.find(x => x.id === (child as any).userData.id);
-      if (d) {
-        const hpRatio = d.hp / d.hpMax;
-        const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
-        mat.emissive.set(hpRatio < 0.5 ? "#ff4400" : "#000000");
-        mat.emissiveIntensity = hpRatio < 0.5 ? (1 - hpRatio) * 0.3 : 0;
-      }
+
+    // Update HP visual (O(1) lookups via the id->mesh map).
+    for (const d of all) {
+      if (d.destroyed) continue;
+      const mesh = map.get(d.id);
+      if (!mesh) continue;
+      const hpRatio = d.hp / d.hpMax;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      mat.emissive.set(hpRatio < 0.5 ? "#ff4400" : "#000000");
+      mat.emissiveIntensity = hpRatio < 0.5 ? (1 - hpRatio) * 0.3 : 0;
     }
   });
   return <group ref={ref} />;
@@ -2361,17 +2439,26 @@ function FuelTanks() {
 
 function VehiclesScene() {
   const ref = useRef<THREE.Group>(null);
+  const meshMap = useRef(new Map<number, THREE.Group>());
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
     const vehs = store.state.vehicles;
-    const ids = new Set(vehs.map(v => v.id));
-    for (let i = g.children.length - 1; i >= 0; i--) {
-      const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
+    const map = meshMap.current;
+    if (g.children.length !== vehs.length) {
+      const ids = new Set<number>();
+      for (let i = 0; i < vehs.length; i++) ids.add(vehs[i].id);
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Group;
+        const id = (c.userData as any).id;
+        if (!ids.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
+      }
     }
     for (const v of vehs) {
-      let mesh = g.children.find((c: any) => c.userData.id === v.id) as THREE.Group | undefined;
+      let mesh = map.get(v.id);
       if (!mesh) {
         mesh = new THREE.Group();
         mesh.userData.id = v.id;
@@ -2387,6 +2474,7 @@ function VehiclesScene() {
           buildJeepMesh(mesh);
         }
         g.add(mesh);
+        map.set(v.id, mesh);
       }
       mesh.position.copy(v.pos);
       // Body attitude from the physics model: yaw (heading) plus weight-transfer
@@ -2551,19 +2639,28 @@ function buildAttackerMesh(g: THREE.Group) {
 // applies full 3-axis flight orientation and flickers the engine flames.
 function AircraftScene() {
   const ref = useRef<THREE.Group>(null);
+  const meshMap = useRef(new Map<number, THREE.Group>());
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
     const planes = store.state.aircraft;
-    const ids = new Set(planes.map((v) => v.id));
+    const map = meshMap.current;
     // Recycle meshes for aircraft that no longer exist.
-    for (let i = g.children.length - 1; i >= 0; i--) {
-      const c = g.children[i] as any;
-      if (!ids.has(c.userData.id)) removeAndDispose(g, c);
+    if (g.children.length !== planes.length) {
+      const ids = new Set<number>();
+      for (let i = 0; i < planes.length; i++) ids.add(planes[i].id);
+      for (let i = g.children.length - 1; i >= 0; i--) {
+        const c = g.children[i] as THREE.Group;
+        const id = (c.userData as any).id;
+        if (!ids.has(id)) {
+          map.delete(id);
+          removeAndDispose(g, c);
+        }
+      }
     }
     const time = performance.now() / 1000;
     for (const v of planes) {
-      let mesh = g.children.find((c: any) => c.userData.id === v.id) as THREE.Group | undefined;
+      let mesh = map.get(v.id);
       if (!mesh) {
         mesh = new THREE.Group();
         mesh.userData.id = v.id;
@@ -2573,6 +2670,7 @@ function AircraftScene() {
           buildFighterMesh(mesh);
         }
         g.add(mesh);
+        map.set(v.id, mesh);
       }
       // Position + full flight orientation. The model nose faces -Z (cockpit
       // forward, nozzle/flame at +Z), and the sim forward vector at yaw=0 is
