@@ -638,6 +638,10 @@ export class GameEngine {
       this.state.mapOpen = !this.state.mapOpen;
       this.input.mapTogglePressed = false;
       this.input.keys.delete("KeyM");
+      // Free the cursor so the map is usable while it's open. The Game
+      // component re-acquires pointer lock automatically when the map closes
+      // (or on the next click), so mouse-look resumes seamlessly.
+      if (this.state.mapOpen) document.exitPointerLock?.();
       store.emit();
     }
     if (this.input.keys.has("Space") || this.input.jumpPressed) {
@@ -2630,6 +2634,10 @@ export class GameEngine {
       (Math.random() - 0.5) * missSpread * 0.6,
       (Math.random() - 0.5) * missSpread,
     ));
+    // Clip the tracer against world geometry so bullets visibly stop at / hit
+    // walls and buildings instead of passing straight through them. This was
+    // the cause of enemy fire appearing to "phase through" cover.
+    this.clipTrailToWorld(muz, trailEnd);
     this.state.trails.push({
       from: muz.clone(),
       to: trailEnd,
@@ -2641,6 +2649,30 @@ export class GameEngine {
     if (distToPlayer < 60 && time - this.lastShotSound > 0.07) {
       this.lastShotSound = time;
       soundEngine.playShot(s.soldierClass === "sniper" ? "sniper" : s.soldierClass === "support" ? "smg" : "rifle");
+    }
+  }
+
+  // Shorten a tracer segment (mutates `to` in place) so it terminates at the
+  // first wall/building the bullet path crosses. Keeps enemy fire from visibly
+  // passing through solid cover. No-op when the path is unobstructed.
+  private clipTrailToWorld(from: THREE.Vector3, to: THREE.Vector3) {
+    const dir = _tmpV1.subVectors(to, from);
+    const len = dir.length();
+    if (len < 1e-4) return;
+    dir.multiplyScalar(1 / len);
+    this.boxGrid.ensureSeen();
+    const near = this.boxGrid.query(
+      Math.min(from.x, to.x), Math.max(from.x, to.x),
+      Math.min(from.z, to.z), Math.max(from.z, to.z),
+      this._boxScratch,
+    );
+    let hitT: number | null = null;
+    for (const b of near) {
+      const t = rayBox(from, dir, b);
+      if (t !== null && t < len && (hitT === null || t < hitT)) hitT = t;
+    }
+    if (hitT !== null) {
+      to.copy(from).addScaledVector(dir, hitT);
     }
   }
 
@@ -2954,13 +2986,33 @@ export class GameEngine {
   }
 
   // Release a free-falling bomb that keeps the plane's forward inertia.
+  // The bomb spawns at the wing station that currently holds the next bomb to
+  // be released (matching the visual rack on the model), so it appears to fall
+  // straight off the wing rather than out of the fuselage centre.
   private dropBomb(ac: Aircraft) {
     if (ac.bombCount <= 0) return;
     const vel = ac.vel.clone();
     vel.y -= 5; // small downward kick at release
+
+    // Compute the local mount point for the bomb being released. The renderer
+    // (buildAttackerMesh) lays out 4 slots: slots 0/1 under the left wing,
+    // 2/3 under the right, inner vs outer. We drop the highest remaining slot
+    // first to mirror the rack-emptying order in AircraftScene.
+    const slot = ac.bombCount - 1;
+    const side = slot < 2 ? -1 : 1;
+    const inner = slot % 2 === 0;
+    const localX = side * (inner ? 1.4 : 2.3);
+    const localY = -0.58;
+    // Rotate the local offset by the aircraft's orientation so the spawn point
+    // tracks the banked/pitched wing rather than a fixed world offset.
+    const offset = new THREE.Vector3(localX, localY, 0);
+    const e = new THREE.Euler(-ac.pitch, ac.yaw, -ac.roll, "YXZ");
+    offset.applyEuler(e);
+    const spawnPos = ac.pos.clone().add(offset);
+
     this.state.aircraftBombs.push({
       id: this.state.nextAircraftBombId++,
-      pos: ac.pos.clone(),
+      pos: spawnPos,
       vel,
       team: ac.team,
       exploded: false,
@@ -2970,17 +3022,53 @@ export class GameEngine {
     ac.lastBombAt = performance.now() / 1000;
   }
 
-  // Integrate dropped bombs under gravity and detonate them on impact.
+  // Integrate dropped bombs under gravity and detonate them on impact with the
+  // ground, terrain, or any building/wall collider along the fall path.
   private updateAircraftBombs(dt: number, time: number) {
     for (const b of this.state.aircraftBombs) {
       if (b.exploded) continue;
       b.vel.y -= AIRCRAFT_GRAVITY * dt;
-      b.pos.addScaledVector(b.vel, dt);
-      if (b.pos.y <= 0.2) {
-        b.pos.y = 0.2;
+      const prev = b.pos.clone();
+      const next = b.pos.clone().addScaledVector(b.vel, dt);
+
+      // --- Building / wall collision (swept ray test) -------------------
+      // Raycast from the previous to the next position against the static
+      // collision boxes so fast-moving bombs can't tunnel through a wall in a
+      // single step. Detonate at the first hit point.
+      const seg = next.clone().sub(prev);
+      const segLen = seg.length();
+      if (segLen > 1e-4) {
+        const dir = seg.clone().multiplyScalar(1 / segLen);
+        this.boxGrid.ensureSeen();
+        const near = this.boxGrid.query(
+          Math.min(prev.x, next.x), Math.max(prev.x, next.x),
+          Math.min(prev.z, next.z), Math.max(prev.z, next.z),
+          this._boxScratch,
+        );
+        let hitT: number | null = null;
+        for (const box of near) {
+          const t = rayBox(prev, dir, box);
+          if (t !== null && t <= segLen && (hitT === null || t < hitT)) hitT = t;
+        }
+        if (hitT !== null) {
+          b.pos.copy(prev).addScaledVector(dir, hitT);
+          b.exploded = true;
+          this.aircraftExplode(b.pos, time, b.team, AIRCRAFT_BOMB_RADIUS, AIRCRAFT_BOMB_DAMAGE);
+          continue;
+        }
+      }
+
+      // --- Ground / terrain collision -----------------------------------
+      const groundY = terrainHeightAt(this.world, next.x, next.z);
+      if (next.y <= groundY + 0.2) {
+        next.y = groundY + 0.2;
+        b.pos.copy(next);
         b.exploded = true;
         this.aircraftExplode(b.pos, time, b.team, AIRCRAFT_BOMB_RADIUS, AIRCRAFT_BOMB_DAMAGE);
+        continue;
       }
+
+      b.pos.copy(next);
     }
     this.state.aircraftBombs = this.state.aircraftBombs.filter((b) => !b.exploded);
   }
