@@ -514,32 +514,33 @@ export class GameEngine {
   }
 
   private updateMedicHeal(dt: number, _time: number) {
-    // Medic class heals nearby allies
-    for (const s of this.state.soldiers) {
+    // Use squared distances everywhere to avoid per-pair Math.sqrt calls.
+    const HEAL_R2 = 8 * 8;
+    const soldiers = this.state.soldiers;
+    // Medic class heals nearby allies. Only enter the O(n²) inner loop for
+    // soldiers that are actually medics (usually a small subset).
+    for (const s of soldiers) {
       if (!s.alive || s.soldierClass !== "medic") continue;
-      for (const ally of this.state.soldiers) {
+      for (const ally of soldiers) {
         if (!ally.alive || ally.team !== s.team || ally.id === s.id) continue;
         if (ally.hp >= ally.hpMax) continue;
-        const d = s.pos.distanceTo(ally.pos);
-        if (d < 8) {
+        if (s.pos.distanceToSquared(ally.pos) < HEAL_R2) {
           ally.hp = Math.min(ally.hpMax, ally.hp + 5 * dt);
         }
       }
       // Heal player if same team
-      if (s.team === "blue") {
-        const d = s.pos.distanceTo(this.state.player.pos);
-        if (d < 8 && this.state.player.hp < this.state.player.hpMax) {
+      if (s.team === "blue" && this.state.player.hp < this.state.player.hpMax) {
+        if (s.pos.distanceToSquared(this.state.player.pos) < HEAL_R2) {
           this.state.player.hp = Math.min(this.state.player.hpMax, this.state.player.hp + 5 * dt);
         }
       }
     }
     // Player medic heals nearby blue soldiers
     if (this.state.loadout.soldierClass === "medic") {
-      for (const s of this.state.soldiers) {
+      for (const s of soldiers) {
         if (!s.alive || s.team !== "blue") continue;
         if (s.hp >= s.hpMax) continue;
-        const d = s.pos.distanceTo(this.state.player.pos);
-        if (d < 8) {
+        if (s.pos.distanceToSquared(this.state.player.pos) < HEAL_R2) {
           s.hp = Math.min(s.hpMax, s.hp + 8 * dt);
         }
       }
@@ -1904,31 +1905,41 @@ export class GameEngine {
       const classSpec = CLASSES[s.soldierClass];
 
       // ---- 1. Target selection: own sight + nearby squad callouts ----
-      const visibleTargets: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; dist: number }[] = [];
-      const cand: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean }[] = [];
+      // We only need the single CLOSEST visible enemy, so instead of collecting
+      // every candidate, doing the expensive line-of-sight test on each, then
+      // sorting, we:
+      //   1. cheaply find the nearest in-range candidate via squared distance,
+      //   2. run the costly canSee() line-of-sight pass on candidates ordered by
+      //      proximity, stopping at the first one we can actually see.
+      // This dramatically cuts the number of lineOfSight raycasts per frame.
+      const SIGHT_R2 = 160 * 160;
+      type Cand = { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; d2: number };
+      const cand: Cand[] = [];
       if (s.team === "red" && playerAlive) {
-        cand.push({ pos: p.pos, vel: p.vel, id: 0, isPlayer: true });
+        const d2 = s.pos.distanceToSquared(p.pos);
+        if (d2 <= SIGHT_R2) cand.push({ pos: p.pos, vel: p.vel, id: 0, isPlayer: true, d2 });
       }
       for (const o of this.state.soldiers) {
         if (!o.alive || o.team === s.team) continue;
-        cand.push({ pos: o.pos, vel: o.vel, id: o.id, isPlayer: false });
+        const d2 = s.pos.distanceToSquared(o.pos);
+        if (d2 > SIGHT_R2) continue;
+        cand.push({ pos: o.pos, vel: o.vel, id: o.id, isPlayer: false, d2 });
       }
+      // Nearest-first so the first visible candidate is also the closest.
+      cand.sort((a, b) => a.d2 - b.d2);
+      let visTarget: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; dist: number } | null = null;
       for (const c of cand) {
-        const d = s.pos.distanceTo(c.pos);
-        if (d > 160) continue;
         if (this.canSee(s, c.pos, time)) {
-          visibleTargets.push({ ...c, dist: d });
+          visTarget = { pos: c.pos, vel: c.vel, id: c.id, isPlayer: c.isPlayer, dist: Math.sqrt(c.d2) };
+          break;
         }
       }
-
-      // Sort visible by closest
-      visibleTargets.sort((a, b) => a.dist - b.dist);
-      const visTarget = visibleTargets[0] || null;
       let sharedTarget: { pos: THREE.Vector3; id: number; dist: number } | null = null;
       if (!visTarget) {
+        const ALLY_R2 = 34 * 34;
         for (const ally of this.state.soldiers) {
           if (!ally.alive || ally.team !== s.team || ally.id === s.id || !ally.lastSeenPos) continue;
-          if (s.pos.distanceTo(ally.pos) > 34 || time - ally.lastSeenAt > 2.4) continue;
+          if (time - ally.lastSeenAt > 2.4 || s.pos.distanceToSquared(ally.pos) > ALLY_R2) continue;
           const distToCallout = s.pos.distanceTo(ally.lastSeenPos);
           if (!sharedTarget || distToCallout < sharedTarget.dist) {
             sharedTarget = { pos: ally.lastSeenPos.clone().add(s.squadOffset), id: ally.targetId ?? -1, dist: distToCallout };
@@ -2040,20 +2051,29 @@ export class GameEngine {
 
       const hasLOS = !!visTarget;
 
-      // Local squad strength near this soldier vs near the threat — used so a
-      // lone, outnumbered soldier behaves more cautiously instead of suicide-rushing.
-      let alliesNear = 0;
-      let enemiesNearThreat = 0;
-      for (const o of this.state.soldiers) {
-        if (!o.alive) continue;
-        if (o.team === s.team && o.id !== s.id && o.pos.distanceTo(s.pos) < 26) alliesNear++;
-        else if (o.team !== s.team && o.pos.distanceTo(target.pos) < 22) enemiesNearThreat++;
-      }
-      const outnumbered = enemiesNearThreat > alliesNear + 1;
-
       // ---- 4. Tactical decision making — aggressive but cover-aware ----
       const inCommittedState = s.state === "flank" || s.state === "retreat" || s.state === "cover";
-      if (time >= s.nextTacticalDecisionAt && !(inCommittedState && s.coverTimer > 0)) {
+      const makingDecision = time >= s.nextTacticalDecisionAt && !(inCommittedState && s.coverTimer > 0);
+      // Local squad strength near this soldier vs near the threat — used so a
+      // lone, outnumbered soldier behaves more cautiously instead of suicide-rushing.
+      // This O(n) scan is only needed when we actually re-evaluate tactics this
+      // frame, so it's gated behind `makingDecision` (skips the full soldier scan
+      // on the vast majority of frames).
+      let outnumbered = false;
+      if (makingDecision) {
+        let alliesNear = 0;
+        let enemiesNearThreat = 0;
+        const ALLY_R2 = 26 * 26;
+        const THREAT_R2 = 22 * 22;
+        for (const o of this.state.soldiers) {
+          if (!o.alive) continue;
+          if (o.team === s.team && o.id !== s.id && o.pos.distanceToSquared(s.pos) < ALLY_R2) alliesNear++;
+          else if (o.team !== s.team && o.pos.distanceToSquared(target.pos) < THREAT_R2) enemiesNearThreat++;
+        }
+        outnumbered = enemiesNearThreat > alliesNear + 1;
+      }
+
+      if (makingDecision) {
         s.nextTacticalDecisionAt = time + (inCommittedState ? 1.4 : 0.7) + Math.random() * 0.4;
         const hpFrac = s.hp / s.hpMax;
         const lowHp = hpFrac < 0.35;
@@ -2096,7 +2116,7 @@ export class GameEngine {
           } else if (hasLOS && dist < 48 && Math.random() < 0.55) s.state = "flank";
           else s.state = hasLOS ? "chase" : "investigate";
         } else { // medic
-          const hurtAlly = this.state.soldiers.find((ally) => ally.alive && ally.team === s.team && ally.hp < ally.hpMax * 0.4 && ally.pos.distanceTo(s.pos) < 24);
+          const hurtAlly = this.state.soldiers.find((ally) => ally.alive && ally.team === s.team && ally.hp < ally.hpMax * 0.4 && ally.pos.distanceToSquared(s.pos) < 576);
           if (hurtAlly && Math.random() < 0.6) {
             s.state = "cover";
             s.coverTarget = hurtAlly.pos.clone().addScaledVector(dirToT, -2);
@@ -2383,8 +2403,10 @@ export class GameEngine {
       desired.copy(candidates.find((dir) => !this.isMoveBlocked(s.pos, dir, 2.2)) ?? original.multiplyScalar(-1));
     }
 
-    // Ally separation
-    const sep = new THREE.Vector3();
+    // Ally separation — accumulate into plain scalars to avoid a per-call
+    // Vector3 allocation (this runs for every soldier every frame).
+    let sepX = 0;
+    let sepZ = 0;
     let count = 0;
     for (const o of this.state.soldiers) {
       if (!o.alive || o.id === s.id || o.team !== s.team) continue;
@@ -2393,14 +2415,14 @@ export class GameEngine {
       const d2 = dx * dx + dz * dz;
       if (d2 < 9 && d2 > 0.0001) {
         const inv = 1 / Math.sqrt(d2);
-        sep.x += dx * inv;
-        sep.z += dz * inv;
+        sepX += dx * inv;
+        sepZ += dz * inv;
         count++;
       }
     }
     if (count > 0) {
-      desired.x += sep.x * 0.4;
-      desired.z += sep.z * 0.4;
+      desired.x += sepX * 0.4;
+      desired.z += sepZ * 0.4;
       const l = Math.hypot(desired.x, desired.z);
       if (l > 0.0001) { desired.x /= l; desired.z /= l; }
     }
