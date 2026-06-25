@@ -98,6 +98,91 @@ const _tmpV1 = new THREE.Vector3();
 const _tmpV2 = new THREE.Vector3();
 const _tmpV3 = new THREE.Vector3();
 
+// In-place array compaction (Optimization 4). The transient effect arrays
+// (flashes, hits, trails, grenades, smoke, ragdolls, explosions, damage
+// numbers, aircraft bombs, aircraft gun trails) churn every frame. Replacing
+// `arr = arr.filter(pred)` with `compactInPlace(arr, pred)` reuses the same
+// backing array — no per-frame allocation, no GC pressure, identical result.
+function compactInPlace<T>(arr: T[], keep: (item: T) => boolean): T[] {
+  let w = 0;
+  for (let i = 0; i < arr.length; i++) {
+    if (keep(arr[i])) {
+      if (w !== i) arr[w] = arr[i];
+      w++;
+    }
+  }
+  arr.length = w;
+  return arr;
+}
+
+// Per-frame uniform XZ grid over live soldiers (Optimization 5). The AI target
+// selection + squad callout scan was O(n²): every soldier iterated every other
+// soldier. With TEAM_SIZE per side that is ~2k distance checks/frame just for
+// perception. This grid buckets soldiers by cell so an agent only inspects its
+// nearby cells. The grid is rebuilt once per frame (soldiers move every frame)
+// using scratch arrays — zero per-query allocation. Search radius is large
+// (sight = 160m, ally = 34m), so the cell size is chosen to cover the ally
+// radius in one cell and the sight radius with a modest ring of cells.
+class SoldierGrid {
+  private cell: number;
+  private minX: number;
+  private minZ: number;
+  private cols: number;
+  private rows: number;
+  private buckets: number[][];
+  private soldiers: Soldier[];
+  constructor() {
+    this.cell = 32; // ≥ ally radius (34 ≈ one cell + a touch)
+    const half = WORLD_SIZE / 2 + this.cell;
+    this.minX = -half;
+    this.minZ = -half;
+    this.cols = Math.max(1, Math.ceil((half * 2) / this.cell));
+    this.rows = this.cols;
+    this.buckets = [];
+    for (let i = 0; i < this.cols * this.rows; i++) this.buckets.push([]);
+    this.soldiers = [];
+  }
+  rebuild(soldiers: Soldier[]) {
+    this.soldiers = soldiers;
+    for (let i = 0; i < this.buckets.length; i++) this.buckets[i].length = 0;
+    for (let i = 0; i < soldiers.length; i++) {
+      const s = soldiers[i];
+      if (!s.alive) continue;
+      const c = this.clampCol(Math.floor((s.pos.x - this.minX) / this.cell));
+      const r = this.clampRow(Math.floor((s.pos.z - this.minZ) / this.cell));
+      this.buckets[r * this.cols + c].push(i);
+    }
+  }
+  private clampCol(c: number) { return c < 0 ? 0 : c >= this.cols ? this.cols - 1 : c; }
+  private clampRow(r: number) { return r < 0 ? 0 : r >= this.rows ? this.rows - 1 : r; }
+  // Visit every live soldier within `radius` metres of (x,z). The callback
+  // receives the soldier index into `soldiers[]`. Cells overlapping the query
+  // disc are scanned; duplicates are impossible (a soldier lives in one cell).
+  forEachNear(x: number, z: number, radius: number, cb: (idx: number) => void) {
+    const r = Math.ceil(radius / this.cell);
+    const cc = this.clampCol(Math.floor((x - this.minX) / this.cell));
+    const cr = this.clampRow(Math.floor((z - this.minZ) / this.cell));
+    const r2 = radius * radius;
+    for (let dr = -r; dr <= r; dr++) {
+      const rr = cr + dr;
+      if (rr < 0 || rr >= this.rows) continue;
+      const base = rr * this.cols;
+      for (let dc = -r; dc <= r; dc++) {
+        const col = cc + dc;
+        if (col < 0 || col >= this.cols) continue;
+        const bucket = this.buckets[base + col];
+        for (let k = 0; k < bucket.length; k++) {
+          const idx = bucket[k];
+          const s = this.soldiers[idx];
+          const dx = s.pos.x - x;
+          const dz = s.pos.z - z;
+          if (dx * dx + dz * dz <= r2) cb(idx);
+        }
+      }
+    }
+  }
+}
+
 export class GameEngine {
   state: GameState;
   world: World;
@@ -137,6 +222,8 @@ export class GameEngine {
   // forward-tracking driver view. Recentred toward 0 when the mouse is idle.
   private vehicleLookYaw = 0;
   private vehicleLookPitch = 0;
+  /** Per-frame uniform grid over live soldiers for O(local) AI perception. */
+  private soldierGrid = new SoldierGrid();
 
   constructor(state: GameState, input: GameEngine["input"], world: World) {
     this.state = state;
@@ -1267,7 +1354,17 @@ export class GameEngine {
 
     let bestT = Infinity;
     let bestNormal = new THREE.Vector3(0, 1, 0);
-    for (const box of this.boxes) {
+    // Broadphase: only test the colliders whose grid cells overlap the ray's XZ
+    // extent. A shot spans the whole map length, so we query the full swept XZ
+    // bounding box — still vastly cheaper than iterating every static box.
+    this.boxGrid.ensureSeen();
+    const shotFar = origin.clone().addScaledVector(dir, 200);
+    const nearBoxes = this.boxGrid.query(
+      Math.min(origin.x, shotFar.x), Math.max(origin.x, shotFar.x),
+      Math.min(origin.z, shotFar.z), Math.max(origin.z, shotFar.z),
+      this._boxScratch,
+    );
+    for (const box of nearBoxes) {
       const t = rayBox(origin, dir, box);
       if (t !== null && t < bestT) {
         bestT = t;
@@ -1947,7 +2044,18 @@ export class GameEngine {
     // ターゲットからも外すことで無駄な被弾エフェクト/追尾を防ぐ。
     const playerAlive = p.hp > 0 && this.state.status === "playing" && !this.playerIsMounted();
 
-    for (const s of this.state.soldiers) {
+    // Rebuild the per-frame soldier spatial grid once (Optimization 5). Both
+    // the enemy-sight scan and the squad-callout scan below now query only the
+    // cells near each agent instead of iterating every soldier, turning the
+    // O(n²) perception pass into ~O(local). Result is identical.
+    const soldiers = this.state.soldiers;
+    this.soldierGrid.rebuild(soldiers);
+    const SIGHT_R = 160;
+    const SIGHT_R2 = SIGHT_R * SIGHT_R;
+    const ALLY_R = 34;
+    const ALLY_R2 = ALLY_R * ALLY_R;
+
+    for (const s of soldiers) {
       if (!s.alive) continue;
 
       const classSpec = CLASSES[s.soldierClass];
@@ -1960,19 +2068,21 @@ export class GameEngine {
       //   2. run the costly canSee() line-of-sight pass on candidates ordered by
       //      proximity, stopping at the first one we can actually see.
       // This dramatically cuts the number of lineOfSight raycasts per frame.
-      const SIGHT_R2 = 160 * 160;
       type Cand = { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; d2: number };
       const cand: Cand[] = [];
       if (s.team === "red" && playerAlive) {
         const d2 = s.pos.distanceToSquared(p.pos);
         if (d2 <= SIGHT_R2) cand.push({ pos: p.pos, vel: p.vel, id: 0, isPlayer: true, d2 });
       }
-      for (const o of this.state.soldiers) {
-        if (!o.alive || o.team === s.team) continue;
+      // Spatial-grid enemy scan: only inspect soldiers in cells within sight
+      // range of this agent, instead of all soldiers.
+      this.soldierGrid.forEachNear(s.pos.x, s.pos.z, SIGHT_R, (idx) => {
+        const o = soldiers[idx];
+        if (o.team === s.team) return;
         const d2 = s.pos.distanceToSquared(o.pos);
-        if (d2 > SIGHT_R2) continue;
+        if (d2 > SIGHT_R2) return;
         cand.push({ pos: o.pos, vel: o.vel, id: o.id, isPlayer: false, d2 });
-      }
+      });
       // Nearest-first so the first visible candidate is also the closest.
       cand.sort((a, b) => a.d2 - b.d2);
       let visTarget: { pos: THREE.Vector3; vel: THREE.Vector3; id: number; isPlayer: boolean; dist: number } | null = null;
@@ -1984,15 +2094,16 @@ export class GameEngine {
       }
       let sharedTarget: { pos: THREE.Vector3; id: number; dist: number } | null = null;
       if (!visTarget) {
-        const ALLY_R2 = 34 * 34;
-        for (const ally of this.state.soldiers) {
-          if (!ally.alive || ally.team !== s.team || ally.id === s.id || !ally.lastSeenPos) continue;
-          if (time - ally.lastSeenAt > 2.4 || s.pos.distanceToSquared(ally.pos) > ALLY_R2) continue;
+        // Spatial-grid squad-callout scan: only inspect allies in nearby cells.
+        this.soldierGrid.forEachNear(s.pos.x, s.pos.z, ALLY_R, (idx) => {
+          const ally = soldiers[idx];
+          if (ally.team !== s.team || ally.id === s.id || !ally.lastSeenPos) return;
+          if (time - ally.lastSeenAt > 2.4 || s.pos.distanceToSquared(ally.pos) > ALLY_R2) return;
           const distToCallout = s.pos.distanceTo(ally.lastSeenPos);
           if (!sharedTarget || distToCallout < sharedTarget.dist) {
             sharedTarget = { pos: ally.lastSeenPos.clone().add(s.squadOffset), id: ally.targetId ?? -1, dist: distToCallout };
           }
-        }
+        });
       }
 
       // Update memory
@@ -2704,7 +2815,14 @@ export class GameEngine {
         g.vel.x *= 0.6;
         g.vel.z *= 0.6;
       }
-      for (const b of this.boxes) {
+      // Broadphase: only test colliders in the grenade's nearby grid cells.
+      this.boxGrid.ensureSeen();
+      const nearBoxes = this.boxGrid.query(
+        next.x - 0.5, next.x + 0.5,
+        next.z - 0.5, next.z + 0.5,
+        this._boxScratch,
+      );
+      for (const b of nearBoxes) {
         if (
           next.x > b.min.x - 0.2 &&
           next.x < b.max.x + 0.2 &&
@@ -2737,14 +2855,14 @@ export class GameEngine {
         this.explode(g.pos, time, g.team);
       }
     }
-    this.state.grenades = this.state.grenades.filter((g) => g.fuse > 0);
+    compactInPlace(this.state.grenades, (g) => g.fuse > 0);
   }
 
   private updateSmokeClouds(dt: number) {
     for (const sc of this.state.smokeClouds) {
       sc.age += dt;
     }
-    this.state.smokeClouds = this.state.smokeClouds.filter((sc) => sc.age < sc.ttl);
+    compactInPlace(this.state.smokeClouds, (sc) => sc.age < sc.ttl);
   }
 
   private updateRagdolls(dt: number) {
@@ -2761,7 +2879,7 @@ export class GameEngine {
       }
       r.ttl -= dt;
     }
-    this.state.ragdolls = this.state.ragdolls.filter((r) => r.ttl > 0);
+    compactInPlace(this.state.ragdolls, (r) => r.ttl > 0);
   }
 
   // === AIRCRAFT ============================================================
@@ -3070,7 +3188,7 @@ export class GameEngine {
 
       b.pos.copy(next);
     }
-    this.state.aircraftBombs = this.state.aircraftBombs.filter((b) => !b.exploded);
+    compactInPlace(this.state.aircraftBombs, (b) => !b.exploded);
   }
 
   // Parametrised explosion used by aircraft bombs (larger radius/damage than a
@@ -3204,20 +3322,20 @@ export class GameEngine {
 
   private updateEffects(dt: number) {
     for (const f of this.state.flashes) f.ttl -= dt;
-    this.state.flashes = this.state.flashes.filter((f) => f.ttl > 0);
+    compactInPlace(this.state.flashes, (f) => f.ttl > 0);
     for (const h of this.state.hits) h.ttl -= dt;
-    this.state.hits = this.state.hits.filter((h) => h.ttl > 0);
+    compactInPlace(this.state.hits, (h) => h.ttl > 0);
     for (const t of this.state.trails) t.ttl -= dt;
-    this.state.trails = this.state.trails.filter((t) => t.ttl > 0);
+    compactInPlace(this.state.trails, (t) => t.ttl > 0);
     for (const gt of this.state.aircraftGunTrails) gt.ttl -= dt;
-    this.state.aircraftGunTrails = this.state.aircraftGunTrails.filter((gt) => gt.ttl > 0);
+    compactInPlace(this.state.aircraftGunTrails, (gt) => gt.ttl > 0);
     for (const e of this.state.explosions) e.age += dt;
-    this.state.explosions = this.state.explosions.filter((e) => e.age < e.ttl);
+    compactInPlace(this.state.explosions, (e) => e.age < e.ttl);
     for (const d of this.state.damageNumbers) {
       d.ttl -= dt;
       d.pos.y += dt * 0.8;
     }
-    this.state.damageNumbers = this.state.damageNumbers.filter((d) => d.ttl > 0);
+    compactInPlace(this.state.damageNumbers, (d) => d.ttl > 0);
     if (this.state.hitMarker > 0) this.state.hitMarker -= dt;
     if (this.state.headshotMarker > 0) this.state.headshotMarker -= dt;
     if (this.state.damageFlash > 0) this.state.damageFlash -= dt;
