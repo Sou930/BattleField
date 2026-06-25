@@ -110,6 +110,53 @@ const _scratchColorB = new THREE.Color();
 const _explosionColorFrom = new THREE.Color("#ffe18a");
 const _explosionColorTo = new THREE.Color("#ff3a14");
 
+// --- Shared effect resources (Optimization 2) -----------------------------
+// Transient combat effects (hits, muzzle flashes, explosions, bullet trails,
+// ragdolls, smoke) spawn and die constantly. Building/disposing a fresh
+// geometry+material each time churns the GC and leaks VRAM over long sessions.
+// Instead we build ONE shared geometry + material per effect kind and hand out
+// lightweight Object3D wrappers from a pool that only grows to the high-water
+// mark. Dead slots are hidden (visible=false) and reused — no per-frame
+// allocation, no disposal, identical visuals.
+const _sharedHitGeo = new THREE.SphereGeometry(0.06, 6, 6);
+const _sharedFlashGeo = new THREE.SphereGeometry(0.15, 8, 8);
+const _sharedExplosionGeo = new THREE.SphereGeometry(1, 16, 16);
+const _sharedGrenadeGeo = new THREE.SphereGeometry(0.18, 10, 10);
+const _sharedRagdollGeo = new THREE.BoxGeometry(1, 1, 1);
+const _sharedSmokeGeo = new THREE.SphereGeometry(1, 16, 12);
+const _sharedTrailPositions = new Float32Array(6);
+
+// Generic per-component pool: lazily materializes pooled wrappers on demand
+// and never shrinks below the peak count seen so far. Returns the live set
+// sized exactly to `count`, with extras hidden.
+function usePooledMeshes<T extends THREE.Object3D>(
+  ref: React.MutableRefObject<THREE.Group | null>,
+  count: number,
+  factory: () => T,
+): T[] {
+  const g = ref.current;
+  if (!g) return [];
+  const children = g.children as unknown as T[];
+  // Grow the pool to cover the requested count.
+  while (children.length < count) {
+    const obj = factory();
+    g.add(obj as unknown as THREE.Object3D);
+  }
+  // Hide any surplus wrappers from previous frames.
+  for (let i = count; i < children.length; i++) {
+    const c = children[i];
+    if (c.visible !== false) c.visible = false;
+  }
+  // Re-show the live ones (a previously-hidden slot may now be reused).
+  for (let i = 0; i < count; i++) {
+    const c = children[i];
+    if (!c.visible) c.visible = true;
+  }
+  // Return a slice view; the array backing is the group's children which only
+  // grows, so indices 0..count-1 are stable.
+  return children.slice(0, count);
+}
+
 // All in-game textures. Kept here so they can be warmed into the browser /
 // THREE cache while the menu is on screen — by the time the player presses
 // Start, decoding is already done and the map appears almost instantly.
@@ -1577,8 +1624,60 @@ function Soldiers() {
   return <group ref={ref} />;
 }
 
-function buildSoldierMesh(team: "blue" | "red") {
-  const mesh = new THREE.Group();
+// --- Shared soldier resources (Optimization 1) ----------------------------
+// A full soldier mesh builds ~15 geometries and ~10 materials. With TEAM_SIZE
+// soldiers per team that is hundreds of duplicated GPU resources. We now cache
+// ONE complete set of geometries + materials per team and clone only the cheap
+// Object3D graph (groups/meshes) per soldier — the heavy GPU buffers are shared,
+// so adding soldiers costs almost nothing on the GPU. Visuals are identical
+// because every soldier of a team already used the same colours/values.
+interface SoldierResources {
+  geos: {
+    pelvis: THREE.BoxGeometry;
+    leg: THREE.CylinderGeometry;
+    knee: THREE.SphereGeometry;
+    boot: THREE.BoxGeometry;
+    torso: THREE.BoxGeometry;
+    vest: THREE.BoxGeometry;
+    pouch: THREE.BoxGeometry;
+    patch: THREE.BoxGeometry;
+    upperArm: THREE.CylinderGeometry;
+    forearm: THREE.CylinderGeometry;
+    hand: THREE.BoxGeometry;
+    neck: THREE.CylinderGeometry;
+    head: THREE.SphereGeometry;
+    eye: THREE.SphereGeometry;
+    helm: THREE.SphereGeometry;
+    rim: THREE.TorusGeometry;
+    strap: THREE.TorusGeometry;
+    vis: THREE.BoxGeometry;
+    nvg: THREE.BoxGeometry;
+    rifleBody: THREE.BoxGeometry;
+    rifleMag: THREE.BoxGeometry;
+    rifleStock: THREE.BoxGeometry;
+    rifleScope: THREE.CylinderGeometry;
+    grip: THREE.BoxGeometry;
+  };
+  mats: {
+    skin: THREE.MeshStandardMaterial;
+    uniform: THREE.MeshStandardMaterial;
+    uniformDark: THREE.MeshStandardMaterial;
+    boot: THREE.MeshStandardMaterial;
+    glove: THREE.MeshStandardMaterial;
+    vest: THREE.MeshStandardMaterial;
+    helm: THREE.MeshStandardMaterial;
+    metal: THREE.MeshStandardMaterial;
+    patch: THREE.MeshBasicMaterial;
+    eye: THREE.MeshBasicMaterial;
+    rim: THREE.MeshStandardMaterial;
+    strap: THREE.MeshStandardMaterial;
+    vis: THREE.MeshBasicMaterial;
+  };
+}
+const _soldierResCache: Partial<Record<"blue" | "red", SoldierResources>> = {};
+function getSoldierResources(team: "blue" | "red"): SoldierResources {
+  const cached = _soldierResCache[team];
+  if (cached) return cached;
   const isRed = team === "red";
   const accent = isRed ? "#b02828" : "#2050b8";
   const accentEm = isRed ? "#3a0606" : "#04144a";
@@ -1590,26 +1689,78 @@ function buildSoldierMesh(team: "blue" | "red") {
   const boot = "#1a1410";
   const glove = "#2a1f18";
 
-  // Slightly tuned PBR values give skin a soft sheen, cloth a matte look and
-  // gear a believable hard-surface response — more lifelike soldiers at no
-  // geometry/texture cost.
-  const matSkin = new THREE.MeshStandardMaterial({ color: skin, roughness: 0.62, metalness: 0.0 });
-  const matUniform = new THREE.MeshStandardMaterial({ color: uniform, roughness: 0.92 });
-  const matUniformDark = new THREE.MeshStandardMaterial({ color: uniformDark, roughness: 0.96 });
-  const matBoot = new THREE.MeshStandardMaterial({ color: boot, roughness: 0.55, metalness: 0.1 });
-  const matGlove = new THREE.MeshStandardMaterial({ color: glove, roughness: 0.88 });
-  const matVest = new THREE.MeshStandardMaterial({
-    color: accent,
-    roughness: 0.5,
-    metalness: 0.15,
-    emissive: accentEm,
-    emissiveIntensity: 0.35,
-  });
-  const matHelm = new THREE.MeshStandardMaterial({ color: helmetCol, roughness: 0.42, metalness: 0.2 });
-  const matMetal = new THREE.MeshStandardMaterial({ color: "#15151a", metalness: 0.6, roughness: 0.4 });
+  const res: SoldierResources = {
+    geos: {
+      pelvis: new THREE.BoxGeometry(0.42, 0.22, 0.32),
+      leg: new THREE.CylinderGeometry(0.11, 0.1, 0.7, 10),
+      knee: new THREE.SphereGeometry(0.11, 10, 8),
+      boot: new THREE.BoxGeometry(0.16, 0.13, 0.28),
+      torso: new THREE.BoxGeometry(0.5, 0.65, 0.3),
+      vest: new THREE.BoxGeometry(0.46, 0.5, 0.34),
+      pouch: new THREE.BoxGeometry(0.1, 0.13, 0.06),
+      patch: new THREE.BoxGeometry(0.08, 0.08, 0.02),
+      upperArm: new THREE.CylinderGeometry(0.07, 0.07, 0.42, 10),
+      forearm: new THREE.CylinderGeometry(0.06, 0.07, 0.4, 10),
+      hand: new THREE.BoxGeometry(0.1, 0.1, 0.12),
+      neck: new THREE.CylinderGeometry(0.07, 0.08, 0.1, 10),
+      head: new THREE.SphereGeometry(0.16, 16, 14),
+      eye: new THREE.SphereGeometry(0.018, 6, 6),
+      helm: new THREE.SphereGeometry(0.21, 16, 12, 0, Math.PI * 2, 0, Math.PI / 1.7),
+      rim: new THREE.TorusGeometry(0.2, 0.018, 6, 20),
+      strap: new THREE.TorusGeometry(0.15, 0.012, 6, 16, Math.PI),
+      vis: new THREE.BoxGeometry(0.18, 0.025, 0.04),
+      nvg: new THREE.BoxGeometry(0.06, 0.05, 0.06),
+      rifleBody: new THREE.BoxGeometry(0.07, 0.12, 0.85),
+      rifleMag: new THREE.BoxGeometry(0.06, 0.18, 0.1),
+      rifleStock: new THREE.BoxGeometry(0.06, 0.1, 0.22),
+      rifleScope: new THREE.CylinderGeometry(0.035, 0.035, 0.18, 10),
+      grip: new THREE.BoxGeometry(0.05, 0.1, 0.06),
+    },
+    mats: {
+      skin: new THREE.MeshStandardMaterial({ color: skin, roughness: 0.62, metalness: 0.0 }),
+      uniform: new THREE.MeshStandardMaterial({ color: uniform, roughness: 0.92 }),
+      uniformDark: new THREE.MeshStandardMaterial({ color: uniformDark, roughness: 0.96 }),
+      boot: new THREE.MeshStandardMaterial({ color: boot, roughness: 0.55, metalness: 0.1 }),
+      glove: new THREE.MeshStandardMaterial({ color: glove, roughness: 0.88 }),
+      vest: new THREE.MeshStandardMaterial({
+        color: accent,
+        roughness: 0.5,
+        metalness: 0.15,
+        emissive: accentEm,
+        emissiveIntensity: 0.35,
+      }),
+      helm: new THREE.MeshStandardMaterial({ color: helmetCol, roughness: 0.42, metalness: 0.2 }),
+      metal: new THREE.MeshStandardMaterial({ color: "#15151a", metalness: 0.6, roughness: 0.4 }),
+      patch: new THREE.MeshBasicMaterial({ color: isRed ? "#ff4040" : "#40a0ff" }),
+      eye: new THREE.MeshBasicMaterial({ color: "#1a1a1a" }),
+      rim: new THREE.MeshStandardMaterial({ color: "#1a1a1a", roughness: 0.7 }),
+      strap: new THREE.MeshStandardMaterial({ color: "#1a1410" }),
+      vis: new THREE.MeshBasicMaterial({ color: visorCol }),
+    },
+  };
+  _soldierResCache[team] = res;
+  return res;
+}
+
+function buildSoldierMesh(team: "blue" | "red") {
+  const mesh = new THREE.Group();
+  const isRed = team === "red";
+  // Shared, cached geometries + materials (built once per team).
+  const G = getSoldierResources(team).geos;
+  const M = getSoldierResources(team).mats;
+
+  // NOTE: geometries + materials are the shared, cached instances from
+  // getSoldierResources(). Only the lightweight Object3D wrappers are created
+  // here per soldier — the GPU buffers (vertex/index/material shaders) are
+  // reused across every soldier of the same team, slashing draw-prep cost and
+  // VRAM. Visuals are byte-for-byte identical to the previous per-soldier build.
+  const matSkin = M.skin, matUniform = M.uniform, matUniformDark = M.uniformDark;
+  const matBoot = M.boot, matGlove = M.glove, matVest = M.vest;
+  const matHelm = M.helm, matMetal = M.metal;
+  const visorCol = isRed ? "#ff4040" : "#40b0ff";
 
   // ===== Hips/Pelvis =====
-  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.22, 0.32), matUniformDark);
+  const pelvis = new THREE.Mesh(G.pelvis, matUniformDark);
   pelvis.position.y = -0.95;
   pelvis.castShadow = true;
   mesh.add(pelvis);
@@ -1618,22 +1769,19 @@ function buildSoldierMesh(team: "blue" | "red") {
   // Each leg is built inside a pivot group anchored at the hip (y ≈ -1.05) so
   // rotating the group swings the whole leg + knee + boot about the hip joint.
   const HIP_Y = -1.05;
-  const legGeo = new THREE.CylinderGeometry(0.11, 0.1, 0.7, 10);
-  const kneeGeo = new THREE.SphereGeometry(0.11, 10, 8);
-  const bootGeo = new THREE.BoxGeometry(0.16, 0.13, 0.28);
 
   const makeLeg = (side: number) => {
     const pivot = new THREE.Group();
     pivot.position.set(0.12 * side, HIP_Y, 0);
-    const leg = new THREE.Mesh(legGeo, matUniform);
+    const leg = new THREE.Mesh(G.leg, matUniform);
     leg.position.set(0, -0.35, 0); // top of the thigh at the hip pivot
     leg.castShadow = true;
     pivot.add(leg);
-    const knee = new THREE.Mesh(kneeGeo, matUniformDark);
+    const knee = new THREE.Mesh(G.knee, matUniformDark);
     knee.position.set(0, -0.35, 0.06);
     knee.scale.set(1, 0.5, 1);
     pivot.add(knee);
-    const boot = new THREE.Mesh(bootGeo, matBoot);
+    const boot = new THREE.Mesh(G.boot, matBoot);
     boot.position.set(0, -0.77, 0.04);
     boot.castShadow = true;
     pivot.add(boot);
@@ -1644,121 +1792,104 @@ function buildSoldierMesh(team: "blue" | "red") {
   const legPivotR = makeLeg(1);
 
   // ===== Torso =====
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.3), matUniform);
+  const torso = new THREE.Mesh(G.torso, matUniform);
   torso.position.y = -0.5;
   torso.castShadow = true;
   mesh.add(torso);
 
   // Tactical vest (chest plate)
-  const vestPlate = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.5, 0.34), matVest);
+  const vestPlate = new THREE.Mesh(G.vest, matVest);
   vestPlate.position.set(0, -0.45, 0);
   vestPlate.castShadow = true;
   mesh.add(vestPlate);
 
   // Mag pouches on vest
   for (const px of [-0.13, 0, 0.13]) {
-    const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.13, 0.06), matUniformDark);
+    const pouch = new THREE.Mesh(G.pouch, matUniformDark);
     pouch.position.set(px, -0.62, 0.18);
     mesh.add(pouch);
   }
   // Team identifier patch on shoulder
-  const patch = new THREE.Mesh(
-    new THREE.BoxGeometry(0.08, 0.08, 0.02),
-    new THREE.MeshBasicMaterial({ color: isRed ? "#ff4040" : "#40a0ff" }),
-  );
+  const patch = new THREE.Mesh(G.patch, M.patch);
   patch.position.set(-0.22, -0.3, 0.06);
   mesh.add(patch);
 
   // ===== Arms =====
   // Upper arms angled forward to hold rifle
-  const upperArmGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.42, 10);
-  const upperL = new THREE.Mesh(upperArmGeo, matUniform);
+  const upperL = new THREE.Mesh(G.upperArm, matUniform);
   upperL.position.set(-0.3, -0.45, 0.05);
   upperL.rotation.x = -0.4;
   upperL.castShadow = true;
   mesh.add(upperL);
-  const upperR = new THREE.Mesh(upperArmGeo, matUniform);
+  const upperR = new THREE.Mesh(G.upperArm, matUniform);
   upperR.position.set(0.3, -0.45, 0.05);
   upperR.rotation.x = -0.4;
   upperR.castShadow = true;
   mesh.add(upperR);
 
   // Forearms
-  const forearmGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.4, 10);
-  const fArmL = new THREE.Mesh(forearmGeo, matUniform);
+  const fArmL = new THREE.Mesh(G.forearm, matUniform);
   fArmL.position.set(-0.18, -0.7, -0.22);
   fArmL.rotation.x = -1.0;
   mesh.add(fArmL);
-  const fArmR = new THREE.Mesh(forearmGeo, matUniform);
+  const fArmR = new THREE.Mesh(G.forearm, matUniform);
   fArmR.position.set(0.18, -0.7, -0.22);
   fArmR.rotation.x = -1.0;
   mesh.add(fArmR);
 
   // Gloves (hands)
-  const handGeo = new THREE.BoxGeometry(0.1, 0.1, 0.12);
-  const handL = new THREE.Mesh(handGeo, matGlove);
+  const handL = new THREE.Mesh(G.hand, matGlove);
   handL.position.set(-0.16, -0.85, -0.42);
   mesh.add(handL);
-  const handR = new THREE.Mesh(handGeo, matGlove);
+  const handR = new THREE.Mesh(G.hand, matGlove);
   handR.position.set(0.16, -0.85, -0.42);
   mesh.add(handR);
 
   // ===== Neck =====
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.1, 10), matSkin);
+  const neck = new THREE.Mesh(G.neck, matSkin);
   neck.position.y = -0.1;
   mesh.add(neck);
 
   // ===== Head =====
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 14), matSkin);
+  const head = new THREE.Mesh(G.head, matSkin);
   head.position.y = 0.08;
   head.scale.set(1, 1.1, 1.05);
   head.castShadow = true;
   mesh.add(head);
 
   // Eyes
-  const eyeGeo = new THREE.SphereGeometry(0.018, 6, 6);
-  const eyeMat = new THREE.MeshBasicMaterial({ color: "#1a1a1a" });
-  const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+  const eyeL = new THREE.Mesh(G.eye, M.eye);
   eyeL.position.set(-0.05, 0.1, 0.14);
   mesh.add(eyeL);
-  const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+  const eyeR = new THREE.Mesh(G.eye, M.eye);
   eyeR.position.set(0.05, 0.1, 0.14);
   mesh.add(eyeR);
 
   // ===== Helmet =====
-  const helm = new THREE.Mesh(
-    new THREE.SphereGeometry(0.21, 16, 12, 0, Math.PI * 2, 0, Math.PI / 1.7),
-    matHelm,
-  );
+  const helm = new THREE.Mesh(G.helm, matHelm);
   helm.position.y = 0.14;
   helm.castShadow = true;
   mesh.add(helm);
 
   // Helmet rim
-  const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(0.2, 0.018, 6, 20),
-    new THREE.MeshStandardMaterial({ color: "#1a1a1a", roughness: 0.7 }),
-  );
+  const rim = new THREE.Mesh(G.rim, M.rim);
   rim.position.y = 0.06;
   rim.rotation.x = Math.PI / 2;
   mesh.add(rim);
 
   // Chin strap
-  const strap = new THREE.Mesh(
-    new THREE.TorusGeometry(0.15, 0.012, 6, 16, Math.PI),
-    new THREE.MeshStandardMaterial({ color: "#1a1410" }),
-  );
+  const strap = new THREE.Mesh(G.strap, M.strap);
   strap.position.y = 0.02;
   strap.rotation.x = -Math.PI / 2;
   mesh.add(strap);
 
   // Visor stripe (team color)
-  const vis = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.025, 0.04), new THREE.MeshBasicMaterial({ color: visorCol }));
+  const vis = new THREE.Mesh(G.vis, M.vis);
   vis.position.set(0, 0.18, 0.18);
   mesh.add(vis);
 
   // NVG mount (small bump on front of helmet)
-  const nvg = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.06), matMetal);
+  const nvg = new THREE.Mesh(G.nvg, matMetal);
   nvg.position.set(0, 0.22, 0.16);
   mesh.add(nvg);
 
@@ -1766,24 +1897,24 @@ function buildSoldierMesh(team: "blue" | "red") {
   const rifleGroup = new THREE.Group();
   rifleGroup.position.set(0, -0.78, -0.45);
 
-  const rifleBody = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.12, 0.85), matMetal);
+  const rifleBody = new THREE.Mesh(G.rifleBody, matMetal);
   rifleGroup.add(rifleBody);
 
-  const rifleMag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.1), matMetal);
+  const rifleMag = new THREE.Mesh(G.rifleMag, matMetal);
   rifleMag.position.set(0, -0.13, -0.05);
   rifleGroup.add(rifleMag);
 
-  const rifleStock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.22), matMetal);
+  const rifleStock = new THREE.Mesh(G.rifleStock, matMetal);
   rifleStock.position.set(0, 0, 0.45);
   rifleGroup.add(rifleStock);
 
-  const rifleScope = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.18, 10), matMetal);
+  const rifleScope = new THREE.Mesh(G.rifleScope, matMetal);
   rifleScope.rotation.x = Math.PI / 2;
   rifleScope.position.set(0, 0.09, 0);
   rifleGroup.add(rifleScope);
 
   // foregrip
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.06), matMetal);
+  const grip = new THREE.Mesh(G.grip, matMetal);
   grip.position.set(0, -0.1, -0.2);
   rifleGroup.add(grip);
 
@@ -1809,6 +1940,13 @@ function buildSoldierMesh(team: "blue" | "red") {
 function Grenades() {
   const ref = useRef<THREE.Group>(null);
   const meshMap = useRef(new Map<number, THREE.Mesh>());
+  // One shared material template cloned per live grenade so the fuse-flicker
+  // emissive can be set per instance without paying for a fresh geometry each
+  // spawn. Geometries are the shared pool instance.
+  const grenadeMatTemplate = useMemo(
+    () => new THREE.MeshStandardMaterial({ color: "#2b3018", roughness: 0.5 }),
+    [],
+  );
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
@@ -1830,10 +1968,10 @@ function Grenades() {
     for (const gr of grenades) {
       let m = map.get(gr.id);
       if (!m) {
-        m = new THREE.Mesh(
-          new THREE.SphereGeometry(0.18, 10, 10),
-          new THREE.MeshStandardMaterial({ color: "#2b3018", roughness: 0.5 }),
-        );
+        // Clone the shared material (cheap uniform copy) + use the shared
+        // geometry (no new vertex buffer). The clone keeps the base colour and
+        // only mutates emissive per frame.
+        m = new THREE.Mesh(_sharedGrenadeGeo, grenadeMatTemplate.clone());
         m.castShadow = true;
         m.userData.id = gr.id;
         g.add(m);
@@ -1858,20 +1996,19 @@ function Explosions() {
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    g.renderOrder = 100;
-    while (g.children.length < store.state.explosions.length) {
+    if (g.renderOrder !== 100) g.renderOrder = 100;
+    const list = store.state.explosions;
+    const meshes = usePooledMeshes(ref, list.length, () => {
       const m = new THREE.Mesh(
-        new THREE.SphereGeometry(1, 16, 16),
+        _sharedExplosionGeo,
         new THREE.MeshBasicMaterial({ color: "#ffaa44", transparent: true, opacity: 0.9, depthWrite: false }),
       );
       m.renderOrder = 100;
-      g.add(m);
-    }
-    while (g.children.length > store.state.explosions.length) {
-      removeAndDispose(g, g.children[g.children.length - 1]);
-    }
-    store.state.explosions.forEach((e, i) => {
-      const m = g.children[i] as THREE.Mesh;
+      return m as unknown as THREE.Mesh;
+    });
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      const m = meshes[i];
       const t = e.age / e.ttl;
       const r = 0.5 + t * 6;
       m.scale.setScalar(r);
@@ -1881,7 +2018,7 @@ function Explosions() {
       // Lerp directly into the material's own Color using shared constant
       // endpoints — no per-frame Color allocations.
       mat.color.lerpColors(_explosionColorFrom, _explosionColorTo, t);
-    });
+    }
   });
   return <group ref={ref} />;
 }
@@ -1891,24 +2028,23 @@ function Hits() {
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    while (g.children.length < store.state.hits.length) {
-      const m = new THREE.Mesh(
-        new THREE.SphereGeometry(0.06, 6, 6),
+    const list = store.state.hits;
+    const meshes = usePooledMeshes(ref, list.length, () =>
+      new THREE.Mesh(
+        _sharedHitGeo,
         new THREE.MeshBasicMaterial({ color: "#ffd56b" }),
-      );
-      g.add(m);
-    }
-    while (g.children.length > store.state.hits.length) {
-      removeAndDispose(g, g.children[g.children.length - 1]);
-    }
-    store.state.hits.forEach((h, i) => {
-      const m = g.children[i] as THREE.Mesh;
+      ) as unknown as THREE.Mesh,
+    );
+    for (let i = 0; i < list.length; i++) {
+      const h = list[i];
+      const m = meshes[i];
       m.position.copy(h.point);
       const mat = m.material as THREE.MeshBasicMaterial;
       mat.transparent = true;
       mat.opacity = Math.min(1, h.ttl / 0.5);
+      // Enemy hits are rendered elsewhere (damage numbers); hide here.
       m.visible = !h.enemyId;
-    });
+    }
   });
   return <group ref={ref} />;
 }
@@ -1918,26 +2054,25 @@ function MuzzleFlashes() {
   useFrame(() => {
     const g = ref.current;
     if (!g) return;
-    while (g.children.length < store.state.flashes.length) {
+    const list = store.state.flashes;
+    const meshes = usePooledMeshes(ref, list.length, () => {
       const m = new THREE.Mesh(
-        new THREE.SphereGeometry(0.15, 8, 8),
+        _sharedFlashGeo,
         new THREE.MeshBasicMaterial({ color: "#ffd27a", transparent: true, depthWrite: false }),
       );
       m.renderOrder = 100;
-      g.add(m);
-    }
-    while (g.children.length > store.state.flashes.length) {
-      removeAndDispose(g, g.children[g.children.length - 1]);
-    }
-    store.state.flashes.forEach((f, i) => {
-      const m = g.children[i] as THREE.Mesh;
+      return m as unknown as THREE.Mesh;
+    });
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      const m = meshes[i];
       m.position.copy(f.pos);
       m.scale.setScalar(0.7 + Math.random() * 0.6);
       const mat = m.material as THREE.MeshBasicMaterial;
       // Set into the existing Color rather than allocating one per frame.
       mat.color.set(f.color);
       mat.opacity = Math.min(1, f.ttl / 0.06);
-    });
+    }
   });
   return <group ref={ref} />;
 }
@@ -1949,26 +2084,24 @@ function SmokeCloudsScene() {
     const g = ref.current;
     if (!g) return;
     const clouds = store.state.smokeClouds;
-    // Remove old meshes
-    while (g.children.length > clouds.length) removeAndDispose(g, g.children[g.children.length - 1]);
-    // Add/update
-    for (let i = 0; i < clouds.length; i++) {
-      const sc = clouds[i];
-      let mesh = g.children[i] as THREE.Mesh | undefined;
-      if (!mesh) {
-        const geo = new THREE.SphereGeometry(1, 16, 12);
-        const mat = new THREE.MeshStandardMaterial({
+    const meshes = usePooledMeshes(ref, clouds.length, () => {
+      const mesh = new THREE.Mesh(
+        _sharedSmokeGeo,
+        new THREE.MeshStandardMaterial({
           color: "#cccccc",
           transparent: true,
           opacity: 0.6,
           roughness: 1,
           depthWrite: false,
           depthTest: true,
-        });
-        mesh = new THREE.Mesh(geo, mat);
-        mesh.renderOrder = 50;
-        g.add(mesh);
-      }
+        }),
+      );
+      mesh.renderOrder = 50;
+      return mesh as unknown as THREE.Mesh;
+    });
+    for (let i = 0; i < clouds.length; i++) {
+      const sc = clouds[i];
+      const mesh = meshes[i];
       const fadeIn = Math.min(1, sc.age / 1.5);
       const fadeOut = Math.max(0, 1 - (sc.age - sc.ttl + 2) / 2);
       const opacity = Math.min(fadeIn, fadeOut) * 0.55;
@@ -2059,18 +2192,18 @@ function RagdollsScene() {
     const g = ref.current;
     if (!g) return;
     const parts = store.state.ragdolls;
-    while (g.children.length > parts.length) removeAndDispose(g, g.children[g.children.length - 1]);
+    const meshes = usePooledMeshes(ref, parts.length, () => {
+      const mesh = new THREE.Mesh(
+        _sharedRagdollGeo,
+        new THREE.MeshStandardMaterial({ color: "#888888", roughness: 0.8, transparent: true, depthWrite: false }),
+      );
+      mesh.castShadow = true;
+      mesh.renderOrder = 10;
+      return mesh as unknown as THREE.Mesh;
+    });
     for (let i = 0; i < parts.length; i++) {
       const r = parts[i];
-      let mesh = g.children[i] as THREE.Mesh | undefined;
-      if (!mesh) {
-        const geo = new THREE.BoxGeometry(1, 1, 1);
-        const mat = new THREE.MeshStandardMaterial({ color: r.color, roughness: 0.8, transparent: true, depthWrite: false });
-        mesh = new THREE.Mesh(geo, mat);
-        mesh.castShadow = true;
-        mesh.renderOrder = 10;
-        g.add(mesh);
-      }
+      const mesh = meshes[i];
       mesh.position.copy(r.pos);
       mesh.scale.set(r.size.x, r.size.y, r.size.z);
       mesh.rotation.copy(r.rot);
@@ -2089,19 +2222,20 @@ function BulletTrails() {
     const g = ref.current;
     if (!g) return;
     const trails = store.state.trails;
-    while (g.children.length > trails.length) removeAndDispose(g, g.children[g.children.length - 1]);
+    const lines = usePooledMeshes(ref, trails.length, () => {
+      const geo = new THREE.BufferGeometry();
+      // Each pooled line owns its own 6-float position buffer (trails need
+      // per-instance endpoints), but the geometry wrapper is reused across
+      // frames — no disposal churn.
+      geo.setAttribute('position', new THREE.BufferAttribute(_sharedTrailPositions.slice(), 3));
+      const mat = new THREE.LineBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.6, linewidth: 1, depthWrite: false });
+      const line = new THREE.Line(geo, mat);
+      line.renderOrder = 90;
+      return line as unknown as THREE.Line;
+    });
     for (let i = 0; i < trails.length; i++) {
       const t = trails[i];
-      let line = g.children[i] as THREE.Line | undefined;
-      if (!line) {
-        const geo = new THREE.BufferGeometry();
-        const positions = new Float32Array(6);
-        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const mat = new THREE.LineBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.6, linewidth: 1, depthWrite: false });
-        line = new THREE.Line(geo, mat);
-        line.renderOrder = 90;
-        g.add(line);
-      }
+      const line = lines[i];
       const posAttr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
       posAttr.setXYZ(0, t.from.x, t.from.y, t.from.z);
       posAttr.setXYZ(1, t.to.x, t.to.y, t.to.z);
